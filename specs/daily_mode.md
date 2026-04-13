@@ -81,3 +81,11 @@ After posting the public embed, the bot sends a **private ephemeral follow-up** 
 - **"Full leaderboard"**: Creates a public thread on the summary message and posts a full embed (same color and title, all entries listed in ranked order) there.
   - **Thread fallback**: If the command was invoked inside a thread (where creating sub-threads is not possible), the full leaderboard embed is posted directly into the same thread instead.
 - **"Remove"**: Deletes the public summary embed.
+
+#### After "Full leaderboard" is clicked
+
+The original 2-button ephemeral message is deleted and replaced with a new ephemeral message containing **three** buttons:
+
+- **"Full leaderboard"**: Same as above (posts another full leaderboard).
+- **"Remove"**: Same as above (deletes the public summary embed).
+- **"Remove full leaderboard"**: Deletes the full leaderboard message that was posted (whether in a newly created thread or directly in an existing thread).

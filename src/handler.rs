@@ -23,6 +23,10 @@ pub struct Handler {
     /// can verify who invoked the command and find the message to delete.
     leaderboard_msgs:
         std::sync::Mutex<HashMap<(u64, &'static str), (ChannelId, MessageId, u64)>>,
+    /// Tracks the last posted full-leaderboard message per (guild_id, command_name).
+    /// Used by the "Remove full leaderboard" button.
+    full_leaderboard_msgs:
+        std::sync::Mutex<HashMap<(u64, &'static str), (ChannelId, MessageId)>>,
     /// Optional allowlist of channel IDs. When `Some`, only messages from these
     /// channels are parsed. When `None`, all channels are processed.
     channel_ids: Option<Vec<u64>>,
@@ -35,6 +39,7 @@ impl Handler {
         Self {
             db: std::sync::Mutex::new(db),
             leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
+            full_leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
             channel_ids,
             admin_ids,
         }
@@ -191,6 +196,31 @@ impl Handler {
         if let Ok(mut map) = self.leaderboard_msgs.lock() {
             map.insert((guild_id, cmd), (channel_id, message_id, invoker_id));
         }
+    }
+
+    /// Store the full-leaderboard message for (guild_id, cmd).
+    fn store_full_leaderboard_msg(
+        &self,
+        guild_id: u64,
+        cmd: &'static str,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
+        if let Ok(mut map) = self.full_leaderboard_msgs.lock() {
+            map.insert((guild_id, cmd), (channel_id, message_id));
+        }
+    }
+
+    /// Look up and remove the full-leaderboard message for (guild_id, cmd).
+    fn take_full_leaderboard_msg(
+        &self,
+        guild_id: u64,
+        cmd: &'static str,
+    ) -> Option<(ChannelId, MessageId)> {
+        self.full_leaderboard_msgs
+            .lock()
+            .ok()?
+            .remove(&(guild_id, cmd))
     }
 
     /// Build the leaderboard summary embed for the given command.
@@ -632,19 +662,15 @@ impl EventHandler for Handler {
                 let embed = match self.build_full_leaderboard_embed(cmd_name, gid) {
                     Ok(e) => e,
                     Err(msg) => {
-                        let ack = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(msg)
-                                .ephemeral(true),
+                        let ack = CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new().content(msg),
                         );
                         let _ = component.create_response(&ctx.http, ack).await;
                         return;
                     }
                 };
 
-                // The original summary message the button is attached to (ephemeral follow-up).
-                // We need the *public* summary message to create a thread on.
-                // Look it up from our stored map.
+                // Look up the public summary message to create a thread on.
                 let cmd_key = cmd_name_key(cmd_name);
                 let stored = self
                     .leaderboard_msgs
@@ -653,16 +679,14 @@ impl EventHandler for Handler {
                     .and_then(|map| map.get(&(gid, cmd_key)).copied());
 
                 let Some((ch_id, msg_id, _)) = stored else {
-                    let ack = CreateInteractionResponse::Message(
+                    let ack = CreateInteractionResponse::UpdateMessage(
                         CreateInteractionResponseMessage::new()
-                            .content("The leaderboard message is no longer available.")
-                            .ephemeral(true),
+                            .content("The leaderboard message is no longer available."),
                     );
                     let _ = component.create_response(&ctx.http, ack).await;
                     return;
                 };
 
-                // Acknowledge the button click immediately (ephemeral).
                 let in_thread = component
                     .channel
                     .as_ref()
@@ -674,26 +698,44 @@ impl EventHandler for Handler {
                     })
                     .unwrap_or(false);
 
-                let ack_text = if in_thread {
-                    "Posting full leaderboard..."
-                } else {
-                    "Creating thread..."
-                };
-                let ack = CreateInteractionResponse::Message(
+                // Replace the old 2-button ephemeral with a 3-button version.
+                let three_buttons = CreateActionRow::Buttons(vec![
+                    CreateButton::new(format!("full_lb:{}:{}", cmd_name, gid))
+                        .label("Full leaderboard")
+                        .style(ButtonStyle::Primary),
+                    CreateButton::new(format!("remove_lb:{}:{}", cmd_name, gid))
+                        .label("Remove")
+                        .style(ButtonStyle::Danger),
+                    CreateButton::new(format!("remove_full_lb:{}:{}", cmd_name, gid))
+                        .label("Remove full leaderboard")
+                        .style(ButtonStyle::Danger),
+                ]);
+                let update = CreateInteractionResponse::UpdateMessage(
                     CreateInteractionResponseMessage::new()
-                        .content(ack_text)
-                        .ephemeral(true),
+                        .content("Leaderboard actions:")
+                        .components(vec![three_buttons]),
                 );
-                if let Err(e) = component.create_response(&ctx.http, ack).await {
-                    error!("Failed to acknowledge full_lb button: {}", e);
+                if let Err(e) = component.create_response(&ctx.http, update).await {
+                    error!("Failed to update ephemeral with 3 buttons: {}", e);
                     return;
                 }
 
+                // Post the full leaderboard and track the message.
                 if in_thread {
                     // Already in a thread — post the full embed directly here.
                     let msg = CreateMessage::new().embed(embed);
-                    if let Err(e) = ch_id.send_message(&ctx.http, msg).await {
-                        error!("Failed to send full leaderboard in thread: {}", e);
+                    match ch_id.send_message(&ctx.http, msg).await {
+                        Ok(posted) => {
+                            self.store_full_leaderboard_msg(
+                                gid,
+                                cmd_key,
+                                posted.channel_id,
+                                posted.id,
+                            );
+                        }
+                        Err(e) => {
+                            error!("Failed to send full leaderboard in thread: {}", e);
+                        }
                     }
                 } else {
                     // Create a public thread on the summary message.
@@ -706,8 +748,21 @@ impl EventHandler for Handler {
                         Ok(thread) => {
                             let thread_ch = thread.id;
                             let msg = CreateMessage::new().embed(embed);
-                            if let Err(e) = thread_ch.send_message(&ctx.http, msg).await {
-                                error!("Failed to send full leaderboard to thread: {}", e);
+                            match thread_ch.send_message(&ctx.http, msg).await {
+                                Ok(posted) => {
+                                    self.store_full_leaderboard_msg(
+                                        gid,
+                                        cmd_key,
+                                        posted.channel_id,
+                                        posted.id,
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to send full leaderboard to thread: {}",
+                                        e
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -759,6 +814,57 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .content(
                                     "The leaderboard message is no longer tracked \
+                                     (it may have already been removed).",
+                                )
+                                .ephemeral(true),
+                        );
+                        let _ = component.create_response(&ctx.http, ack).await;
+                    }
+                }
+            } else if let Some(rest) = custom_id.strip_prefix("remove_full_lb:") {
+                // "Remove full leaderboard" button — delete the full leaderboard message.
+                let Some((cmd_name, gid_str)) = rest.split_once(':') else {
+                    warn!("Malformed remove_full_lb custom_id: {}", custom_id);
+                    return;
+                };
+                let Ok(gid) = gid_str.parse::<u64>() else {
+                    warn!("Invalid guild_id in remove_full_lb custom_id: {}", custom_id);
+                    return;
+                };
+
+                let cmd_key = cmd_name_key(cmd_name);
+                let stored = self.take_full_leaderboard_msg(gid, cmd_key);
+
+                match stored {
+                    Some((ch_id, full_msg_id)) => {
+                        match ctx.http.delete_message(ch_id, full_msg_id, None).await {
+                            Ok(_) => {
+                                let ack = CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Full leaderboard removed.")
+                                        .ephemeral(true),
+                                );
+                                let _ = component.create_response(&ctx.http, ack).await;
+                            }
+                            Err(e) => {
+                                warn!("Failed to delete full leaderboard message: {}", e);
+                                let ack = CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(
+                                            "Could not delete the full leaderboard \
+                                             (it may have already been removed).",
+                                        )
+                                        .ephemeral(true),
+                                );
+                                let _ = component.create_response(&ctx.http, ack).await;
+                            }
+                        }
+                    }
+                    None => {
+                        let ack = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(
+                                    "The full leaderboard message is no longer tracked \
                                      (it may have already been removed).",
                                 )
                                 .ephemeral(true),
