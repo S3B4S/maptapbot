@@ -30,11 +30,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/maptap-rf ./maptap-rf
+COPY --from=builder /app/target/release/maptapbot ./maptapbot
 
 # Default DB path — override with DATABASE_PATH env var and mount a volume
 ENV DATABASE_PATH=/data/maptap.db
 
 RUN mkdir /data
 
-CMD ["./maptap-rf"]
+CMD ["./maptapbot"]
