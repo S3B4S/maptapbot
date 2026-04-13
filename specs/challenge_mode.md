@@ -1,6 +1,15 @@
 # Challenge mode
-There's another kind of maptap that people can do, the challenge mode. The message for this looks slightly different:
 
+There's another kind of maptap that people can do, the challenge mode. The message format is:
+
+```
+⚡ MapTap Challenge Round - <month> <day>
+www.maptap.gg/challenge
+<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
+Score: <final-score> in <time>s (<spare>s to spare!)
+```
+
+Example:
 ```
 ⚡ MapTap Challenge Round - Apr 12
 www.maptap.gg/challenge
@@ -8,25 +17,43 @@ www.maptap.gg/challenge
 Score: 914 in 21.1s (4.0s to spare!)
 ```
 
-As you can see this introduces some changes.
+## Scores format
 
-The `scores` table should also include a `mode` column.
-- `daily_default` is the default daily mode that is played when the user visits `https://maptap.gg`.
-- `daily_challenge` is the daily challenge that users can play at `https://maptap.gg/challenge`.
+See [shared score rules](./setup.md#shared-score-rules) in setup.md.
 
-An extra column should be added for `time_spent`. This represents an integer in miliseconds `21.1s` => `21100`.
+- `time_spent`: integer in milliseconds — `21.1s` => `21100`
+- The `(X.Xs to spare!)` part can be ignored; it's just `25s - time_spent` and can be derived
 
-The `(4.0s to spare!)` can be ignored when storing in DB, as it's just `25s - time_spent`, so we can derive it.
+## Database
 
-`daily_default` has no `time_spent` so value can be `NULL` there.
+The `scores` table `mode` column value for this mode is `daily_challenge`.
+
+An extra column `time_spent` (integer, milliseconds) is added for this mode.
 
 We need a migration for the DB as it is, as I don't want to destroy the current existing data.
 
-This will also add 2 more commands
+## Commands
 
 ```
 /leaderboard_challenge_daily
+```
+
+Shows today's challenge scores only, scoped to the current guild. Sorted descendingly by total score. Empty state: `"No challenge scores recorded for today yet!"`
+
+```
 /leaderboard_challenge_permanent
 ```
 
-These should report the leaderboard only for the challenge mode.
+Shows all-time challenge scores, scoped to the current guild. Averages each score column across all entries. Sorted descendingly by total score. Empty state: `"No challenge scores recorded yet!"`
+
+### Table format
+
+Same as the [daily mode table](./daily_mode.md#table-format), with one additional column:
+
+| Column | Width | Notes |
+|---|---|---|
+| `#` | 4, left-aligned | Rank |
+| `User` | 20, left-aligned | Truncated to 18 chars + `..` if over limit |
+| `S1`–`S5` | 5, right-aligned | Individual scores |
+| `Total` | 7, right-aligned | Daily: integer; Permanent: 1 decimal average |
+| `Time` | 7, right-aligned | Formatted as `21.1s`; `-` if absent |

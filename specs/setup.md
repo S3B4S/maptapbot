@@ -3,86 +3,80 @@
 ## Description
 We are creating a discord bot that will scan messages from RF, #random channel.
 
-It needs to activate if it parses a message in the form of 
+It needs to activate if it parses a recognized message format. See individual mode specs for exact formats:
+- [Daily mode (default)](./daily_mode.md)
+- [Challenge mode](./challenge_mode.md)
 
-```
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
-```
+## Message parsing rules
 
-Example:
-```
-www.maptap.gg April 13
-93🏆 90👑 83😁 61🫢 97🔥
-Final score: 823
-```
+A parseable message must contain the recognized pattern for a given mode, but it does _not_ need to be the sole text in the message.
 
-Constraints;
-- `score`: must be between `0-100` (inclusive both ends)
-- `final-score`: can not exceed `1000`. The way final score is calculated is;
-    - (first score + second score) * 1
-    - third score * 2
-    - (fourth score + fifth score) * 3
-
-## Message
-The message to parse must include 
-```
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
-```
-
-However, it does _not_ need to be the sole text in the message.
-
-Text before it is allowed
+Text before it is allowed:
 ```
 this is horrible
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
+<parseable message line 1>
+<parseable message line 2>
+<parseable message line 3>
 ```
 
-Even on the same line
+Even on the same line as the first line:
 ```
-this is horrible www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
+this is horrible <parseable message line 1>
+<parseable message line 2>
+<parseable message line 3>
 ```
 
-Text after it is allowed
+Text after it is allowed:
 ```
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
+<parseable message line 1>
+<parseable message line 2>
+<parseable message line 3>
 this is amazing
 ```
 
-And once again, also on the same line as last line 
+And also on the same line as the last line:
 ```
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score> this is amazing
-```
-
-But the 3 lines cannot be interrupted, these are all invalid examples;
-```
-www.maptap.gg <month> <day> This sucks
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
+<parseable message line 1>
+<parseable message line 2>
+<parseable message line 3> this is amazing
 ```
 
+But the lines of the parseable message cannot be interrupted. These are all invalid:
 ```
-www.maptap.gg <month> <day>
-<score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji> wow I did so well today
-Final score: <final-score>
+<parseable message line 1> this sucks
+<parseable message line 2>
+<parseable message line 3>
 ```
 
 ```
-www.maptap.gg <month> <day>
-nahh I'm ebarassed <score><emoji> <score><emoji> <score><emoji> <score><emoji> <score><emoji>
-Final score: <final-score>
+<parseable message line 1>
+<parseable message line 2> wow I did so well today
+<parseable message line 3>
 ```
+
+```
+<parseable message line 1>
+nahh I'm embarrassed <parseable message line 2>
+<parseable message line 3>
+```
+
+## Shared score rules
+
+These apply to all modes:
+
+- Each individual `score` must be between `0-100` (inclusive both ends)
+- `final-score` cannot exceed `1000`
+- Final score is calculated as: `(s1 + s2) * 1 + s3 * 2 + (s4 + s5) * 3`
+- The reported `final-score` in the message must match this formula exactly
+
+## Failure behavior
+
+| Scenario | Bot action |
+|---|---|
+| Message contains no recognizable maptap block | Silent — no reply, no reaction |
+| Maptap block found but validation fails | Replies: `"Invalid maptap score: <reason>"` |
+| Valid score but DB save fails | Replies: `"Internal error saving your score."` |
+| Valid score saved successfully | Reacts with 🗺️ emoji, no reply |
 
 ## Database
 
@@ -93,7 +87,7 @@ The guild the msg comes from should also be stored.
 
 2 tables, 1 for scores, and 1 for user info
 
-Messages;
+Messages:
 - `user_id`
 - `guild_id`
 - `date`
@@ -110,7 +104,7 @@ Key is `user_id` + `guild_id` + `date`
 
 Users:
 - `user_id`
-- `guild_id`
+- `username`
 
 Key is `user_id`
 
@@ -119,4 +113,4 @@ Let's start by just storing these scores in a small local DB.
 ## Tech stack
 - Rust
 - Discord API library in Rust: https://github.com/serenity-rs/serenity
-- Small lightweight DB, please recommend me some
+- SQLite
