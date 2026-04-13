@@ -215,19 +215,23 @@ impl EventHandler for Handler {
 /// If `averages` is true, values are shown with 1 decimal place.
 fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool) -> String {
     let mut out = format!("**{}**\n```\n", title);
-    out.push_str(&format!(
-        "{:<4} {:<20} {:>5} {:>5} {:>5} {:>5} {:>5} {:>7}\n",
+    let header = format!(
+        "{:<4} {:<20} {:>5} {:>5} {:>5} {:>5} {:>5} {:>7}",
         "#", "User", "S1", "S2", "S3", "S4", "S5", "Total"
-    ));
-    out.push_str(&"-".repeat(60));
+    );
+    let width = header.len();
+    out.push_str(&header);
+    out.push('\n');
+    out.push_str(&"-".repeat(width));
     out.push('\n');
 
     for (i, row) in rows.iter().enumerate() {
+        let name = truncate_username(&row.username, 20);
         if averages {
             out.push_str(&format!(
                 "{:<4} {:<20} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>7.1}\n",
                 i + 1,
-                row.username,
+                name,
                 row.score1,
                 row.score2,
                 row.score3,
@@ -239,7 +243,7 @@ fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool
             out.push_str(&format!(
                 "{:<4} {:<20} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>7.0}\n",
                 i + 1,
-                row.username,
+                name,
                 row.score1,
                 row.score2,
                 row.score3,
@@ -252,4 +256,15 @@ fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool
 
     out.push_str("```");
     out
+}
+
+/// Truncate a username to `max_len` characters, appending ".." if truncated.
+fn truncate_username(name: &str, max_len: usize) -> String {
+    if name.len() <= max_len {
+        name.to_string()
+    } else {
+        let mut truncated = name[..max_len - 2].to_string();
+        truncated.push_str("..");
+        truncated
+    }
 }
