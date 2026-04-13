@@ -9,7 +9,7 @@ www.maptap.gg/challenge
 Score: <final-score> in <time>s (<spare>s to spare!)
 ```
 
-Example:
+Example (completed):
 ```
 ⚡ MapTap Challenge Round - Apr 12
 www.maptap.gg/challenge
@@ -17,12 +17,29 @@ www.maptap.gg/challenge
 Score: 914 in 21.1s (4.0s to spare!)
 ```
 
+Example (timed out — failed tile shows `--`):
+```
+⚡ MapTap Challenge Round - Apr 13
+www.maptap.gg/challenge
+96🏅 4🤮 68🙂 91🎉 --
+Score: 509 in 25.0s (TIME UP!)
+```
+
 ## Scores format
 
 See [shared score rules](./setup.md#shared-score-rules) in setup.md.
 
+A score value is either:
+- A digit string (`0`–`100`) — normal score
+- `--` — the tile was not completed in time; stored as `NULL` in the DB
+
+Only digits or `--` are valid score values. Anything else is a parse failure.
+
+When calculating averages for leaderboard purposes, `NULL` scores are treated as `0`.
+
 - `time_spent`: integer in milliseconds — `21.1s` => `21100`
-- The `(X.Xs to spare!)` part can be ignored; it's just `25s - time_spent` and can be derived
+- When the time runs out the suffix is `(TIME UP!)` instead of `(X.Xs to spare!)`; both are ignored when storing
+- The `(TIME UP!)`/`(X.Xs to spare!)` part can be ignored; it's just `25s - time_spent` and can be derived
 
 ## Database
 

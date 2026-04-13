@@ -308,28 +308,29 @@ fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool
 
     for (i, row) in rows.iter().enumerate() {
         let name = truncate_username(&row.username, 20);
+        let scores = [row.score1, row.score2, row.score3, row.score4, row.score5];
         if averages {
+            let fmt: Vec<String> = scores
+                .iter()
+                .map(|s| format!("{:>5.1}", s.unwrap_or(0.0)))
+                .collect();
             out.push_str(&format!(
-                "{:<4} {:<20} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>7.1}\n",
+                "{:<4} {:<20} {} {} {} {} {} {:>7.1}\n",
                 i + 1,
                 name,
-                row.score1,
-                row.score2,
-                row.score3,
-                row.score4,
-                row.score5,
+                fmt[0], fmt[1], fmt[2], fmt[3], fmt[4],
                 row.final_score,
             ));
         } else {
+            let fmt: Vec<String> = scores
+                .iter()
+                .map(|s| format!("{:>5.0}", s.unwrap_or(0.0)))
+                .collect();
             out.push_str(&format!(
-                "{:<4} {:<20} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>7.0}\n",
+                "{:<4} {:<20} {} {} {} {} {} {:>7.0}\n",
                 i + 1,
                 name,
-                row.score1,
-                row.score2,
-                row.score3,
-                row.score4,
-                row.score5,
+                fmt[0], fmt[1], fmt[2], fmt[3], fmt[4],
                 row.final_score,
             ));
         }
@@ -341,6 +342,7 @@ fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool
 
 /// Format a challenge leaderboard table as a Discord code block.
 /// Adds a Time column after Total.
+/// In the daily (non-averages) view, NULL scores (timed-out tiles) render as "--".
 fn format_challenge_leaderboard_table(
     title: &str,
     rows: &[LeaderboardRow],
@@ -363,29 +365,33 @@ fn format_challenge_leaderboard_table(
             Some(ms) => format!("{:.1}s", ms / 1000.0),
             None => "-".to_string(),
         };
+        let scores = [row.score1, row.score2, row.score3, row.score4, row.score5];
         if averages {
+            let fmt: Vec<String> = scores
+                .iter()
+                .map(|s| format!("{:>5.1}", s.unwrap_or(0.0)))
+                .collect();
             out.push_str(&format!(
-                "{:<4} {:<20} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>5.1} {:>7.1} {:>7}\n",
+                "{:<4} {:<20} {} {} {} {} {} {:>7.1} {:>7}\n",
                 i + 1,
                 name,
-                row.score1,
-                row.score2,
-                row.score3,
-                row.score4,
-                row.score5,
+                fmt[0], fmt[1], fmt[2], fmt[3], fmt[4],
                 row.final_score,
                 time_str,
             ));
         } else {
+            let fmt: Vec<String> = scores
+                .iter()
+                .map(|s| match s {
+                    Some(v) => format!("{:>5.0}", v),
+                    None => format!("{:>5}", "--"),
+                })
+                .collect();
             out.push_str(&format!(
-                "{:<4} {:<20} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>7.0} {:>7}\n",
+                "{:<4} {:<20} {} {} {} {} {} {:>7.0} {:>7}\n",
                 i + 1,
                 name,
-                row.score1,
-                row.score2,
-                row.score3,
-                row.score4,
-                row.score5,
+                fmt[0], fmt[1], fmt[2], fmt[3], fmt[4],
                 row.final_score,
                 time_str,
             ));

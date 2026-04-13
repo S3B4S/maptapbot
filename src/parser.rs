@@ -274,49 +274,83 @@ fn parse_header(line: &str) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(year, month, day)
 }
 
-fn parse_scores_line(line: &str) -> Result<[u32; 5], String> {
+fn parse_scores_line(line: &str) -> Result<[Option<u32>; 5], String> {
     // Line like: "93🏆 90👑 83😁 61🫢 97🔥"
-    // Each token is <digits><emoji(s)>. No text allowed before or after the score tokens.
+    // or with a timed-out tile: "96🏅 4🤮 68🙂 91🎉 --"
     //
-    // Reject leading text: line must start with a digit (after trimming whitespace).
-    if line.is_empty() || !line.chars().next().unwrap().is_ascii_digit() {
-        return Err("Scores line must start with a digit".to_string());
+    // Each token is either <digits><emoji(s)> or "--".
+    // Only digits or "--" are valid score values — anything else is a parse failure.
+    // No text allowed before the first token (line must start with digit or '-').
+    if line.is_empty() {
+        return Err("Scores line must start with a digit or '--'".to_string());
     }
-    // Strategy: extract numeric sequences. After the last digit->emoji transition,
-    // only whitespace (or end of string) is allowed — no ASCII letters.
-    let mut scores = Vec::new();
-    let mut current_num = String::new();
-    let mut last_num_end = 0; // byte index after last number was consumed
+    let first = line.chars().next().unwrap();
+    if !first.is_ascii_digit() && first != '-' {
+        return Err("Scores line must start with a digit or '--'".to_string());
+    }
 
-    for (i, ch) in line.char_indices() {
-        if ch.is_ascii_digit() {
-            current_num.push(ch);
-        } else if !current_num.is_empty() {
-            scores.push(
-                current_num
-                    .parse::<u32>()
-                    .map_err(|e| format!("Failed to parse score '{}': {}", current_num, e))?,
-            );
-            last_num_end = i;
-            current_num.clear();
+    let mut scores: Vec<Option<u32>> = Vec::new();
+    let mut chars = line.char_indices().peekable();
+    let mut last_token_end: usize = 0;
+
+    while let Some(&(i, ch)) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            chars.next();
+            continue;
         }
-    }
-    if !current_num.is_empty() {
-        scores.push(
-            current_num
-                .parse::<u32>()
-                .map_err(|e| format!("Failed to parse score '{}': {}", current_num, e))?,
-        );
-        last_num_end = line.len();
+
+        if ch == '-' {
+            // Expect exactly "--"
+            chars.next();
+            match chars.next() {
+                Some((_, '-')) => {
+                    scores.push(None);
+                    last_token_end = i + 2;
+                    // After "--" only whitespace or end-of-string is allowed before next token
+                    // (no emoji follows a timed-out tile, as per spec example)
+                }
+                _ => return Err("Invalid token starting with '-'".to_string()),
+            }
+        } else if ch.is_ascii_digit() {
+            // Collect digit run
+            let mut num_str = String::new();
+            while let Some(&(_, c)) = chars.peek() {
+                if c.is_ascii_digit() {
+                    num_str.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let val: u32 = num_str
+                .parse()
+                .map_err(|e| format!("Failed to parse score '{}': {}", num_str, e))?;
+            scores.push(Some(val));
+            // Consume the following emoji(s) — non-ASCII, non-whitespace chars
+            while let Some(&(j, c)) = chars.peek() {
+                if c.is_ascii() {
+                    last_token_end = j;
+                    break;
+                }
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                last_token_end = line.len();
+            }
+        } else if !ch.is_ascii() {
+            // Unexpected emoji/unicode before a digit token
+            return Err("Scores line must start with a digit or '--'".to_string());
+        } else {
+            return Err(format!("Unexpected character '{}' in scores line", ch));
+        }
     }
 
     if scores.len() != 5 {
         return Err(format!("Expected 5 scores, found {}", scores.len()));
     }
 
-    // Check that nothing after the 5th score's emoji is alphabetic text.
-    // We find where the 5th score ended and scan the remainder.
-    let remainder = &line[last_num_end..];
+    // Check that nothing after the last token is alphabetic text
+    let remainder = &line[last_token_end..];
     if remainder.chars().any(|c| c.is_ascii_alphabetic()) {
         return Err("Unexpected text after scores".to_string());
     }
@@ -358,7 +392,10 @@ mod tests {
         let result = parse_maptap_message(12345, G, msg);
         assert!(result.is_some());
         let score = result.unwrap().unwrap();
-        assert_eq!(score.scores, [93, 90, 83, 61, 97]);
+        assert_eq!(
+            score.scores,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)]
+        );
         assert_eq!(score.final_score, 823);
         assert_eq!(score.date.month(), 4);
         assert_eq!(score.date.day(), 13);
@@ -497,7 +534,10 @@ mod tests {
         let result = parse_challenge_message(1, G, msg);
         assert!(result.is_some(), "expected Some, got None");
         let score = result.unwrap().unwrap();
-        assert_eq!(score.scores, [89, 82, 94, 88, 97]);
+        assert_eq!(
+            score.scores,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)]
+        );
         assert_eq!(score.final_score, 914);
         assert_eq!(score.date.month(), 4);
         assert_eq!(score.date.day(), 12);
@@ -539,6 +579,43 @@ mod tests {
     fn test_default_not_matched_by_challenge_parser() {
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
         assert!(parse_challenge_message(1, G, msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_challenge_timed_out() {
+        // Spec example: 96🏅 4🤮 68🙂 91🎉 -- → last score is None
+        // (96+4)*1 + 68*2 + (91+0)*3 = 100 + 136 + 273 = 509
+        let msg = "⚡ MapTap Challenge Round - Apr 13\nwww.maptap.gg/challenge\n96🏅 4🤮 68🙂 91🎉 --\nScore: 509 in 25.0s (TIME UP!)";
+        let result = parse_challenge_message(1, G, msg);
+        assert!(result.is_some(), "expected Some, got None");
+        let score = result.unwrap().unwrap();
+        assert_eq!(score.scores, [Some(96), Some(4), Some(68), Some(91), None]);
+        assert_eq!(score.final_score, 509);
+        assert_eq!(score.time_spent_ms, Some(25000));
+    }
+
+    #[test]
+    fn test_parse_scores_line_with_dash() {
+        // -- token should parse as None
+        let line = "96🏅 4🤮 68🙂 91🎉 --";
+        let result = parse_scores_line(line).unwrap();
+        assert_eq!(result, [Some(96), Some(4), Some(68), Some(91), None]);
+    }
+
+    #[test]
+    fn test_parse_scores_line_invalid_token() {
+        // Something other than digits or -- is a parse failure
+        let line = "96🏅 4🤮 68🙂 91🎉 xx";
+        assert!(parse_scores_line(line).is_err());
+    }
+
+    #[test]
+    fn test_dash_score_rejected_in_daily_default() {
+        // -- in a daily default message should fail validation
+        let msg = "www.maptap.gg April 13\n96🏆 4👑 68😁 91🫢 --\nFinal score: 509";
+        let result = parse_maptap_message(1, G, msg);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
     }
 
     #[test]

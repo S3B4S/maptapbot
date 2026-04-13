@@ -7,11 +7,12 @@ use crate::models::{GameMode, MaptapScore};
 pub struct LeaderboardRow {
     pub user_id: String,
     pub username: String,
-    pub score1: f64,
-    pub score2: f64,
-    pub score3: f64,
-    pub score4: f64,
-    pub score5: f64,
+    /// Individual scores — None means the tile was timed out (challenge mode only, daily view).
+    pub score1: Option<f64>,
+    pub score2: Option<f64>,
+    pub score3: Option<f64>,
+    pub score4: Option<f64>,
+    pub score5: Option<f64>,
     pub final_score: f64,
     /// Only populated for challenge leaderboards.
     pub time_spent_ms: Option<f64>,
@@ -43,11 +44,11 @@ impl Database {
                 date          TEXT NOT NULL,
                 mode          TEXT NOT NULL DEFAULT 'daily_default',
                 time_spent_ms INTEGER,
-                score1        INTEGER NOT NULL,
-                score2        INTEGER NOT NULL,
-                score3        INTEGER NOT NULL,
-                score4        INTEGER NOT NULL,
-                score5        INTEGER NOT NULL,
+                score1        INTEGER,
+                score2        INTEGER,
+                score3        INTEGER,
+                score4        INTEGER,
+                score5        INTEGER,
                 final_score   INTEGER NOT NULL,
                 raw_message   TEXT,
                 created_at    TEXT DEFAULT (datetime('now')),
@@ -61,12 +62,10 @@ impl Database {
     /// Migrate existing databases that predate the mode/time_spent_ms columns
     /// and the (user_id, guild_id, date, mode) primary key.
     ///
-    /// Strategy:
-    /// 1. If `scores` already has the `mode` column, nothing to do.
-    /// 2. Otherwise recreate the table with the new schema, copying existing rows
-    ///    as mode='daily_default'.
+    /// Migration 1: add mode/time_spent_ms columns (keyed on absence of `mode` column).
+    /// Migration 2: make score1-5 nullable (keyed on `notnull` flag of score1 column).
     fn migrate(&self) -> Result<(), rusqlite::Error> {
-        // Check whether the mode column already exists.
+        // Migration 1: add mode column + restructure PK
         let has_mode: bool = {
             let mut stmt = self
                 .conn
@@ -75,47 +74,86 @@ impl Database {
             count > 0
         };
 
-        if has_mode {
+        if !has_mode {
+            self.conn.execute_batch(
+                "BEGIN;
+
+                CREATE TABLE scores_new (
+                    user_id       TEXT NOT NULL,
+                    guild_id      TEXT,
+                    date          TEXT NOT NULL,
+                    mode          TEXT NOT NULL DEFAULT 'daily_default',
+                    time_spent_ms INTEGER,
+                    score1        INTEGER,
+                    score2        INTEGER,
+                    score3        INTEGER,
+                    score4        INTEGER,
+                    score5        INTEGER,
+                    final_score   INTEGER NOT NULL,
+                    raw_message   TEXT,
+                    created_at    TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (user_id, guild_id, date, mode),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
+                INSERT INTO scores_new
+                    (user_id, guild_id, date, mode, time_spent_ms,
+                     score1, score2, score3, score4, score5,
+                     final_score, raw_message, created_at)
+                SELECT
+                    user_id, guild_id, date, 'daily_default', NULL,
+                    score1, score2, score3, score4, score5,
+                    final_score, raw_message, created_at
+                FROM scores;
+
+                DROP TABLE scores;
+                ALTER TABLE scores_new RENAME TO scores;
+
+                COMMIT;",
+            )?;
             return Ok(());
         }
 
-        // Recreate table with updated schema.
-        self.conn.execute_batch(
-            "BEGIN;
+        // Migration 2: make score1-5 nullable (if score1 still has notnull constraint)
+        let score1_notnull: bool = {
+            let mut stmt = self.conn.prepare(
+                "SELECT \"notnull\" FROM pragma_table_info('scores') WHERE name = 'score1'",
+            )?;
+            let notnull: i64 = stmt.query_row([], |row| row.get(0))?;
+            notnull != 0
+        };
 
-            CREATE TABLE scores_new (
-                user_id       TEXT NOT NULL,
-                guild_id      TEXT,
-                date          TEXT NOT NULL,
-                mode          TEXT NOT NULL DEFAULT 'daily_default',
-                time_spent_ms INTEGER,
-                score1        INTEGER NOT NULL,
-                score2        INTEGER NOT NULL,
-                score3        INTEGER NOT NULL,
-                score4        INTEGER NOT NULL,
-                score5        INTEGER NOT NULL,
-                final_score   INTEGER NOT NULL,
-                raw_message   TEXT,
-                created_at    TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, guild_id, date, mode),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            );
+        if score1_notnull {
+            self.conn.execute_batch(
+                "BEGIN;
 
-            INSERT INTO scores_new
-                (user_id, guild_id, date, mode, time_spent_ms,
-                 score1, score2, score3, score4, score5,
-                 final_score, raw_message, created_at)
-            SELECT
-                user_id, guild_id, date, 'daily_default', NULL,
-                score1, score2, score3, score4, score5,
-                final_score, raw_message, created_at
-            FROM scores;
+                CREATE TABLE scores_new (
+                    user_id       TEXT NOT NULL,
+                    guild_id      TEXT,
+                    date          TEXT NOT NULL,
+                    mode          TEXT NOT NULL DEFAULT 'daily_default',
+                    time_spent_ms INTEGER,
+                    score1        INTEGER,
+                    score2        INTEGER,
+                    score3        INTEGER,
+                    score4        INTEGER,
+                    score5        INTEGER,
+                    final_score   INTEGER NOT NULL,
+                    raw_message   TEXT,
+                    created_at    TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (user_id, guild_id, date, mode),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
 
-            DROP TABLE scores;
-            ALTER TABLE scores_new RENAME TO scores;
+                INSERT INTO scores_new SELECT * FROM scores;
 
-            COMMIT;",
-        )?;
+                DROP TABLE scores;
+                ALTER TABLE scores_new RENAME TO scores;
+
+                COMMIT;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -153,11 +191,11 @@ impl Database {
                 score.date.format("%Y-%m-%d").to_string(),
                 score.mode.as_str(),
                 score.time_spent_ms,
-                score.scores[0],
-                score.scores[1],
-                score.scores[2],
-                score.scores[3],
-                score.scores[4],
+                score.scores[0].map(|v| v as i64),
+                score.scores[1].map(|v| v as i64),
+                score.scores[2].map(|v| v as i64),
+                score.scores[3].map(|v| v as i64),
+                score.scores[4].map(|v| v as i64),
                 score.final_score,
                 score.raw_message,
             ],
@@ -184,11 +222,11 @@ impl Database {
             Ok(LeaderboardRow {
                 user_id: row.get(0)?,
                 username: row.get(1)?,
-                score1: row.get::<_, i64>(2)? as f64,
-                score2: row.get::<_, i64>(3)? as f64,
-                score3: row.get::<_, i64>(4)? as f64,
-                score4: row.get::<_, i64>(5)? as f64,
-                score5: row.get::<_, i64>(6)? as f64,
+                score1: row.get::<_, Option<i64>>(2)?.map(|v| v as f64),
+                score2: row.get::<_, Option<i64>>(3)?.map(|v| v as f64),
+                score3: row.get::<_, Option<i64>>(4)?.map(|v| v as f64),
+                score4: row.get::<_, Option<i64>>(5)?.map(|v| v as f64),
+                score5: row.get::<_, Option<i64>>(6)?.map(|v| v as f64),
                 final_score: row.get::<_, i64>(7)? as f64,
                 time_spent_ms: None,
             })
@@ -221,11 +259,11 @@ impl Database {
             Ok(LeaderboardRow {
                 user_id: row.get(0)?,
                 username: row.get(1)?,
-                score1: row.get(2)?,
-                score2: row.get(3)?,
-                score3: row.get(4)?,
-                score4: row.get(5)?,
-                score5: row.get(6)?,
+                score1: row.get::<_, Option<f64>>(2)?,
+                score2: row.get::<_, Option<f64>>(3)?,
+                score3: row.get::<_, Option<f64>>(4)?,
+                score4: row.get::<_, Option<f64>>(5)?,
+                score5: row.get::<_, Option<f64>>(6)?,
                 final_score: row.get(7)?,
                 time_spent_ms: None,
             })
@@ -253,11 +291,11 @@ impl Database {
             Ok(LeaderboardRow {
                 user_id: row.get(0)?,
                 username: row.get(1)?,
-                score1: row.get::<_, i64>(2)? as f64,
-                score2: row.get::<_, i64>(3)? as f64,
-                score3: row.get::<_, i64>(4)? as f64,
-                score4: row.get::<_, i64>(5)? as f64,
-                score5: row.get::<_, i64>(6)? as f64,
+                score1: row.get::<_, Option<i64>>(2)?.map(|v| v as f64),
+                score2: row.get::<_, Option<i64>>(3)?.map(|v| v as f64),
+                score3: row.get::<_, Option<i64>>(4)?.map(|v| v as f64),
+                score4: row.get::<_, Option<i64>>(5)?.map(|v| v as f64),
+                score5: row.get::<_, Option<i64>>(6)?.map(|v| v as f64),
                 final_score: row.get::<_, i64>(7)? as f64,
                 time_spent_ms: row.get::<_, Option<i64>>(8)?.map(|v| v as f64),
             })
@@ -274,13 +312,13 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT s.user_id,
                     u.username,
-                    AVG(s.score1)         as avg_s1,
-                    AVG(s.score2)         as avg_s2,
-                    AVG(s.score3)         as avg_s3,
-                    AVG(s.score4)         as avg_s4,
-                    AVG(s.score5)         as avg_s5,
-                    AVG(s.final_score)    as avg_final,
-                    AVG(s.time_spent_ms)  as avg_time
+                    AVG(COALESCE(s.score1, 0)) as avg_s1,
+                    AVG(COALESCE(s.score2, 0)) as avg_s2,
+                    AVG(COALESCE(s.score3, 0)) as avg_s3,
+                    AVG(COALESCE(s.score4, 0)) as avg_s4,
+                    AVG(COALESCE(s.score5, 0)) as avg_s5,
+                    AVG(s.final_score)          as avg_final,
+                    AVG(s.time_spent_ms)        as avg_time
              FROM scores s
              JOIN users u ON s.user_id = u.user_id
              WHERE s.guild_id = ?1 AND s.mode = 'daily_challenge'
@@ -291,11 +329,11 @@ impl Database {
             Ok(LeaderboardRow {
                 user_id: row.get(0)?,
                 username: row.get(1)?,
-                score1: row.get(2)?,
-                score2: row.get(3)?,
-                score3: row.get(4)?,
-                score4: row.get(5)?,
-                score5: row.get(6)?,
+                score1: row.get::<_, Option<f64>>(2)?,
+                score2: row.get::<_, Option<f64>>(3)?,
+                score3: row.get::<_, Option<f64>>(4)?,
+                score4: row.get::<_, Option<f64>>(5)?,
+                score5: row.get::<_, Option<f64>>(6)?,
                 final_score: row.get(7)?,
                 time_spent_ms: row.get(8)?,
             })
@@ -317,7 +355,7 @@ mod tests {
         user_id: u64,
         guild_id: u64,
         day: u32,
-        scores: [u32; 5],
+        scores: [Option<u32>; 5],
         final_score: u32,
         mode: GameMode,
         time_spent_ms: Option<u32>,
@@ -340,7 +378,7 @@ mod tests {
         user_id: u64,
         guild_id: u64,
         day: u32,
-        scores: [u32; 5],
+        scores: [Option<u32>; 5],
         final_score: u32,
     ) {
         db.upsert_user(user_id, &format!("user{}", user_id))
@@ -363,7 +401,7 @@ mod tests {
         user_id: u64,
         guild_id: u64,
         day: u32,
-        scores: [u32; 5],
+        scores: [Option<u32>; 5],
         final_score: u32,
         time_spent_ms: u32,
     ) {
@@ -401,7 +439,14 @@ mod tests {
     #[test]
     fn test_insert_and_query() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
 
         let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(results.len(), 1);
@@ -413,8 +458,22 @@ mod tests {
     #[test]
     fn test_upsert_overwrites() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [50, 50, 50, 50, 50], 600);
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(50), Some(50), Some(50), Some(50), Some(50)],
+            600,
+        );
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
 
         let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(results.len(), 1);
@@ -424,8 +483,22 @@ mod tests {
     #[test]
     fn test_multiple_users_daily() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
-        insert_score(&db, 2, 100, 13, [50, 50, 50, 50, 50], 600);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
+        insert_score(
+            &db,
+            2,
+            100,
+            13,
+            [Some(50), Some(50), Some(50), Some(50), Some(50)],
+            600,
+        );
 
         let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(results.len(), 2);
@@ -436,8 +509,22 @@ mod tests {
     #[test]
     fn test_guild_scoping() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
-        insert_score(&db, 2, 200, 13, [50, 50, 50, 50, 50], 600);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
+        insert_score(
+            &db,
+            2,
+            200,
+            13,
+            [Some(50), Some(50), Some(50), Some(50), Some(50)],
+            600,
+        );
 
         assert_eq!(
             db.get_daily_leaderboard(100, "2026-04-13").unwrap().len(),
@@ -453,10 +540,31 @@ mod tests {
     fn test_permanent_leaderboard_averages() {
         let db = test_db();
         // User 1: two days, scores 800 and 600 -> avg 700
-        insert_score(&db, 1, 100, 13, [80, 80, 80, 80, 80], 800);
-        insert_score(&db, 1, 100, 14, [60, 60, 60, 60, 60], 600);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(80), Some(80), Some(80), Some(80), Some(80)],
+            800,
+        );
+        insert_score(
+            &db,
+            1,
+            100,
+            14,
+            [Some(60), Some(60), Some(60), Some(60), Some(60)],
+            600,
+        );
         // User 2: one day, score 750
-        insert_score(&db, 2, 100, 13, [75, 75, 75, 75, 75], 750);
+        insert_score(
+            &db,
+            2,
+            100,
+            13,
+            [Some(75), Some(75), Some(75), Some(75), Some(75)],
+            750,
+        );
 
         let results = db.get_permanent_leaderboard(100).unwrap();
         assert_eq!(results.len(), 2);
@@ -472,7 +580,14 @@ mod tests {
     #[test]
     fn test_username_update_reflected_in_leaderboard() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
 
         // Rename user
         db.upsert_user(1, "new_name").unwrap();
@@ -487,9 +602,25 @@ mod tests {
     fn test_challenge_daily_leaderboard() {
         let db = test_db();
         // user1: score 914 in 21100ms
-        insert_challenge_score(&db, 1, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)],
+            914,
+            21100,
+        );
         // user2: same score but slower
-        insert_challenge_score(&db, 2, 100, 13, [89, 82, 94, 88, 97], 914, 25000);
+        insert_challenge_score(
+            &db,
+            2,
+            100,
+            13,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)],
+            914,
+            25000,
+        );
 
         let results = db
             .get_daily_challenge_leaderboard(100, "2026-04-13")
@@ -504,8 +635,23 @@ mod tests {
     #[test]
     fn test_challenge_default_scores_not_mixed() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
-        insert_challenge_score(&db, 2, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
+        insert_challenge_score(
+            &db,
+            2,
+            100,
+            13,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)],
+            914,
+            21100,
+        );
 
         let default_results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(default_results.len(), 1);
@@ -522,10 +668,34 @@ mod tests {
     fn test_challenge_permanent_leaderboard_averages() {
         let db = test_db();
         // user1: two days, 914 and 800
-        insert_challenge_score(&db, 1, 100, 12, [89, 82, 94, 88, 97], 914, 21100);
-        insert_challenge_score(&db, 1, 100, 13, [80, 80, 80, 80, 80], 800, 30000);
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            12,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)],
+            914,
+            21100,
+        );
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(80), Some(80), Some(80), Some(80), Some(80)],
+            800,
+            30000,
+        );
         // user2: one day, 900
-        insert_challenge_score(&db, 2, 100, 12, [85, 85, 90, 85, 90], 900, 18000);
+        insert_challenge_score(
+            &db,
+            2,
+            100,
+            12,
+            [Some(85), Some(85), Some(90), Some(85), Some(90)],
+            900,
+            18000,
+        );
 
         let results = db.get_permanent_challenge_leaderboard(100).unwrap();
         assert_eq!(results.len(), 2);
@@ -540,8 +710,23 @@ mod tests {
     #[test]
     fn test_same_user_can_have_both_modes_same_day() {
         let db = test_db();
-        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
-        insert_challenge_score(&db, 1, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+        insert_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(93), Some(90), Some(83), Some(61), Some(97)],
+            823,
+        );
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(89), Some(82), Some(94), Some(88), Some(97)],
+            914,
+            21100,
+        );
 
         let default_results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(default_results.len(), 1);
@@ -552,5 +737,59 @@ mod tests {
             .unwrap();
         assert_eq!(challenge_results.len(), 1);
         assert_eq!(challenge_results[0].final_score, 914.0);
+    }
+
+    #[test]
+    fn test_challenge_null_score_stored_and_retrieved() {
+        let db = test_db();
+        // Timed-out tile: last score is None
+        // (96+4)*1 + 68*2 + (91+0)*3 = 509
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(96), Some(4), Some(68), Some(91), None],
+            509,
+            25000,
+        );
+
+        let results = db
+            .get_daily_challenge_leaderboard(100, "2026-04-13")
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score5, None);
+        assert_eq!(results[0].final_score, 509.0);
+    }
+
+    #[test]
+    fn test_challenge_null_score_averaged_as_zero() {
+        let db = test_db();
+        // Day 1: all scores present — score5 = 80
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            12,
+            [Some(80), Some(80), Some(80), Some(80), Some(80)],
+            800,
+            20000,
+        );
+        // Day 2: score5 timed out (None = 0 for avg)
+        // (96+4)*1 + 68*2 + (91+0)*3 = 509
+        insert_challenge_score(
+            &db,
+            1,
+            100,
+            13,
+            [Some(96), Some(4), Some(68), Some(91), None],
+            509,
+            25000,
+        );
+
+        let results = db.get_permanent_challenge_leaderboard(100).unwrap();
+        assert_eq!(results.len(), 1);
+        // avg score5: (80 + 0) / 2 = 40.0
+        assert_eq!(results[0].score5, Some(40.0));
     }
 }
