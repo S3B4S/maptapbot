@@ -7,7 +7,7 @@ use serenity::builder::{
     CreateInteractionResponseMessage, CreateMessage, CreateThread,
 };
 use serenity::model::application::{ButtonStyle, CommandOptionType, Interaction};
-use serenity::model::channel::Message;
+use serenity::model::channel::{ChannelType, Message};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId};
 use serenity::prelude::*;
@@ -663,9 +663,25 @@ impl EventHandler for Handler {
                 };
 
                 // Acknowledge the button click immediately (ephemeral).
+                let in_thread = component
+                    .channel
+                    .as_ref()
+                    .map(|ch| {
+                        matches!(
+                            ch.kind,
+                            ChannelType::PublicThread | ChannelType::PrivateThread
+                        )
+                    })
+                    .unwrap_or(false);
+
+                let ack_text = if in_thread {
+                    "Posting full leaderboard..."
+                } else {
+                    "Creating thread..."
+                };
                 let ack = CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("Creating thread...")
+                        .content(ack_text)
                         .ephemeral(true),
                 );
                 if let Err(e) = component.create_response(&ctx.http, ack).await {
@@ -673,22 +689,30 @@ impl EventHandler for Handler {
                     return;
                 }
 
-                // Create a public thread on the summary message.
-                let thread_name = format!("{} — Full", leaderboard_title(cmd_name));
-                let thread_builder = CreateThread::new(&thread_name);
-                match ch_id
-                    .create_thread_from_message(&ctx.http, msg_id, thread_builder)
-                    .await
-                {
-                    Ok(thread) => {
-                        let thread_ch = thread.id;
-                        let msg = CreateMessage::new().embed(embed);
-                        if let Err(e) = thread_ch.send_message(&ctx.http, msg).await {
-                            error!("Failed to send full leaderboard to thread: {}", e);
-                        }
+                if in_thread {
+                    // Already in a thread — post the full embed directly here.
+                    let msg = CreateMessage::new().embed(embed);
+                    if let Err(e) = ch_id.send_message(&ctx.http, msg).await {
+                        error!("Failed to send full leaderboard in thread: {}", e);
                     }
-                    Err(e) => {
-                        warn!("Failed to create thread for full leaderboard: {}", e);
+                } else {
+                    // Create a public thread on the summary message.
+                    let thread_name = format!("{} — Full", leaderboard_title(cmd_name));
+                    let thread_builder = CreateThread::new(&thread_name);
+                    match ch_id
+                        .create_thread_from_message(&ctx.http, msg_id, thread_builder)
+                        .await
+                    {
+                        Ok(thread) => {
+                            let thread_ch = thread.id;
+                            let msg = CreateMessage::new().embed(embed);
+                            if let Err(e) = thread_ch.send_message(&ctx.http, msg).await {
+                                error!("Failed to send full leaderboard to thread: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to create thread for full leaderboard: {}", e);
+                        }
                     }
                 }
             } else if let Some(rest) = custom_id.strip_prefix("remove_lb:") {
