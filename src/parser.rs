@@ -12,30 +12,38 @@ pub fn parse_maptap_message(user_id: u64, content: &str) -> Option<Result<Maptap
         return None;
     }
 
-    // Line 1: "www.maptap.gg <month> <day>"
-    let date = match parse_header(lines[0]) {
-        Some(d) => d,
-        None => return None,
-    };
+    // Find the header line ("www.maptap.gg <month> <day>") anywhere in the message.
+    // The maptap block may not start at line 0 -- it could be preceded by other text.
+    let header_idx = lines.iter().position(|l| parse_header(l).is_some())?;
 
-    // Line 2: scores with emojis
-    let scores = match parse_scores_line(lines[1]) {
+    // Need at least 2 more lines after the header for scores + final score
+    if header_idx + 2 >= lines.len() {
+        return None;
+    }
+
+    let date = parse_header(lines[header_idx]).unwrap();
+
+    // Line after header: scores with emojis
+    let scores = match parse_scores_line(lines[header_idx + 1]) {
         Ok(s) => s,
         Err(e) => return Some(Err(e)),
     };
 
-    // Line 3: "Final score: <N>"
-    let final_score = match parse_final_score(lines[2]) {
+    // Line after scores: "Final score: <N>"
+    let final_score = match parse_final_score(lines[header_idx + 2]) {
         Ok(s) => s,
         Err(e) => return Some(Err(e)),
     };
 
+    // Only store the 3 parsed lines to prevent storing arbitrary attacker-appended
+    // content (e.g. XSS payloads) that could fire if a web frontend ever reads raw_message.
+    let raw_message = lines[header_idx..header_idx + 3].join("\n");
     let score = MaptapScore {
         user_id,
         date,
         scores,
         final_score,
-        raw_message: content.to_string(),
+        raw_message,
     };
 
     Some(score.validate().map(|_| score))
@@ -162,5 +170,61 @@ mod tests {
         assert!(result.is_some());
         let err = result.unwrap().unwrap_err();
         assert!(err.contains("must be 0-100"));
+    }
+
+    #[test]
+    fn test_parse_block_mid_message() {
+        let msg = "Check out my score!\nwww.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
+        let result = parse_maptap_message(1, msg);
+        assert!(result.is_some());
+        let score = result.unwrap().unwrap();
+        assert_eq!(score.scores, [93, 90, 83, 61, 97]);
+        assert_eq!(score.final_score, 823);
+    }
+
+    #[test]
+    fn test_parse_block_with_trailing_content() {
+        let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823\n<script>alert(1)</script>";
+        let result = parse_maptap_message(1, msg);
+        assert!(result.is_some());
+        let score = result.unwrap().unwrap();
+        assert_eq!(score.final_score, 823);
+        // raw_message must NOT contain the trailing XSS payload
+        assert!(!score.raw_message.contains("<script>"));
+        assert_eq!(score.raw_message.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_parse_block_with_prefix_and_suffix() {
+        let msg = "Hey everyone!\nGreat game today\nwww.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823\nLet me know what you think\n<img src=x onerror=alert(1)>";
+        let result = parse_maptap_message(1, msg);
+        assert!(result.is_some());
+        let score = result.unwrap().unwrap();
+        assert_eq!(score.final_score, 823);
+        // raw_message should contain exactly the 3 parsed lines, nothing else
+        assert!(score.raw_message.starts_with("www.maptap.gg"));
+        assert!(score.raw_message.ends_with("823"));
+        assert_eq!(score.raw_message.lines().count(), 3);
+        assert!(!score.raw_message.contains("onerror"));
+        assert!(!score.raw_message.contains("Hey everyone"));
+    }
+
+    #[test]
+    fn test_parse_raw_message_exact_content() {
+        let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
+        let result = parse_maptap_message(1, msg);
+        let score = result.unwrap().unwrap();
+        assert_eq!(
+            score.raw_message,
+            "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823"
+        );
+    }
+
+    #[test]
+    fn test_parse_header_not_enough_lines_after() {
+        // Header found at last line -- not enough lines for scores + final score
+        let msg = "some text\nmore text\nwww.maptap.gg April 13";
+        let result = parse_maptap_message(1, msg);
+        assert!(result.is_none());
     }
 }

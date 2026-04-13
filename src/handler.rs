@@ -22,7 +22,12 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        println!("{}", msg.content);
+        // Sanitize control characters (ANSI escape sequences, etc.) to prevent log injection
+        let sanitized: String = msg.content.chars()
+            .map(|c| if c.is_control() && c != '\n' { '?' } else { c })
+            .collect();
+        
+        println!("{}", sanitized);
 
         // Ignore messages from bots (including ourselves)
         if msg.author.bot {
