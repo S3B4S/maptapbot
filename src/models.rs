@@ -1,9 +1,34 @@
 use chrono::NaiveDate;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameMode {
+    DailyDefault,
+    DailyChallenge,
+}
+
+impl GameMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GameMode::DailyDefault => "daily_default",
+            GameMode::DailyChallenge => "daily_challenge",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "daily_default" => Some(GameMode::DailyDefault),
+            "daily_challenge" => Some(GameMode::DailyChallenge),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MaptapScore {
     pub user_id: u64,
     pub guild_id: Option<u64>,
+    pub mode: GameMode,
+    pub time_spent_ms: Option<u32>, // None for DailyDefault
     pub date: NaiveDate,
     pub scores: [u32; 5],
     pub final_score: u32,
@@ -56,6 +81,8 @@ mod tests {
         MaptapScore {
             user_id: 1,
             guild_id: Some(100),
+            mode: GameMode::DailyDefault,
+            time_spent_ms: None,
             date: NaiveDate::from_ymd_opt(2026, 4, 13).unwrap(),
             scores,
             final_score,
@@ -95,5 +122,18 @@ mod tests {
     fn test_compute_formula() {
         let s = make_score([93, 90, 83, 61, 97], 0);
         assert_eq!(s.compute_final_score(), 823);
+    }
+
+    #[test]
+    fn test_game_mode_round_trip() {
+        assert_eq!(
+            GameMode::from_str("daily_default"),
+            Some(GameMode::DailyDefault)
+        );
+        assert_eq!(
+            GameMode::from_str("daily_challenge"),
+            Some(GameMode::DailyChallenge)
+        );
+        assert_eq!(GameMode::DailyChallenge.as_str(), "daily_challenge");
     }
 }

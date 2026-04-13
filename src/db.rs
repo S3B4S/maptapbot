@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use crate::models::MaptapScore;
+use crate::models::{GameMode, MaptapScore};
 
 /// Row returned by leaderboard queries.
 #[derive(Debug)]
@@ -13,6 +13,8 @@ pub struct LeaderboardRow {
     pub score4: f64,
     pub score5: f64,
     pub final_score: f64,
+    /// Only populated for challenge leaderboards.
+    pub time_spent_ms: Option<f64>,
 }
 
 pub struct Database {
@@ -24,6 +26,7 @@ impl Database {
         let conn = Connection::open(path)?;
         let db = Database { conn };
         db.initialize()?;
+        db.migrate()?;
         Ok(db)
     }
 
@@ -35,20 +38,83 @@ impl Database {
             );
 
             CREATE TABLE IF NOT EXISTS scores (
-                user_id     TEXT NOT NULL,
-                guild_id    TEXT,
-                date        TEXT NOT NULL,
-                score1      INTEGER NOT NULL,
-                score2      INTEGER NOT NULL,
-                score3      INTEGER NOT NULL,
-                score4      INTEGER NOT NULL,
-                score5      INTEGER NOT NULL,
-                final_score INTEGER NOT NULL,
-                raw_message TEXT,
-                created_at  TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, guild_id, date),
+                user_id       TEXT NOT NULL,
+                guild_id      TEXT,
+                date          TEXT NOT NULL,
+                mode          TEXT NOT NULL DEFAULT 'daily_default',
+                time_spent_ms INTEGER,
+                score1        INTEGER NOT NULL,
+                score2        INTEGER NOT NULL,
+                score3        INTEGER NOT NULL,
+                score4        INTEGER NOT NULL,
+                score5        INTEGER NOT NULL,
+                final_score   INTEGER NOT NULL,
+                raw_message   TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, guild_id, date, mode),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );",
+        )?;
+        Ok(())
+    }
+
+    /// Migrate existing databases that predate the mode/time_spent_ms columns
+    /// and the (user_id, guild_id, date, mode) primary key.
+    ///
+    /// Strategy:
+    /// 1. If `scores` already has the `mode` column, nothing to do.
+    /// 2. Otherwise recreate the table with the new schema, copying existing rows
+    ///    as mode='daily_default'.
+    fn migrate(&self) -> Result<(), rusqlite::Error> {
+        // Check whether the mode column already exists.
+        let has_mode: bool = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('scores') WHERE name = 'mode'")?;
+            let count: i64 = stmt.query_row([], |row| row.get(0))?;
+            count > 0
+        };
+
+        if has_mode {
+            return Ok(());
+        }
+
+        // Recreate table with updated schema.
+        self.conn.execute_batch(
+            "BEGIN;
+
+            CREATE TABLE scores_new (
+                user_id       TEXT NOT NULL,
+                guild_id      TEXT,
+                date          TEXT NOT NULL,
+                mode          TEXT NOT NULL DEFAULT 'daily_default',
+                time_spent_ms INTEGER,
+                score1        INTEGER NOT NULL,
+                score2        INTEGER NOT NULL,
+                score3        INTEGER NOT NULL,
+                score4        INTEGER NOT NULL,
+                score5        INTEGER NOT NULL,
+                final_score   INTEGER NOT NULL,
+                raw_message   TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, guild_id, date, mode),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            INSERT INTO scores_new
+                (user_id, guild_id, date, mode, time_spent_ms,
+                 score1, score2, score3, score4, score5,
+                 final_score, raw_message, created_at)
+            SELECT
+                user_id, guild_id, date, 'daily_default', NULL,
+                score1, score2, score3, score4, score5,
+                final_score, raw_message, created_at
+            FROM scores;
+
+            DROP TABLE scores;
+            ALTER TABLE scores_new RENAME TO scores;
+
+            COMMIT;",
         )?;
         Ok(())
     }
@@ -63,25 +129,30 @@ impl Database {
         Ok(())
     }
 
-    /// Insert or replace a score (latest post wins for same user+guild+date).
+    /// Insert or replace a score (latest post wins for same user+guild+date+mode).
     pub fn upsert_score(&self, score: &MaptapScore) -> Result<(), rusqlite::Error> {
         let guild_id_str = score.guild_id.map(|g| g.to_string());
         self.conn.execute(
-            "INSERT INTO scores (user_id, guild_id, date, score1, score2, score3, score4, score5, final_score, raw_message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(user_id, guild_id, date) DO UPDATE SET
-                score1 = excluded.score1,
-                score2 = excluded.score2,
-                score3 = excluded.score3,
-                score4 = excluded.score4,
-                score5 = excluded.score5,
-                final_score = excluded.final_score,
-                raw_message = excluded.raw_message,
-                created_at = datetime('now')",
+            "INSERT INTO scores
+                 (user_id, guild_id, date, mode, time_spent_ms,
+                  score1, score2, score3, score4, score5, final_score, raw_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(user_id, guild_id, date, mode) DO UPDATE SET
+                score1        = excluded.score1,
+                score2        = excluded.score2,
+                score3        = excluded.score3,
+                score4        = excluded.score4,
+                score5        = excluded.score5,
+                final_score   = excluded.final_score,
+                time_spent_ms = excluded.time_spent_ms,
+                raw_message   = excluded.raw_message,
+                created_at    = datetime('now')",
             params![
                 score.user_id.to_string(),
                 guild_id_str,
                 score.date.format("%Y-%m-%d").to_string(),
+                score.mode.as_str(),
+                score.time_spent_ms,
                 score.scores[0],
                 score.scores[1],
                 score.scores[2],
@@ -94,17 +165,19 @@ impl Database {
         Ok(())
     }
 
-    /// Daily leaderboard: all scores for a given guild + date, sorted by final_score desc.
+    /// Daily leaderboard (default mode): all scores for a given guild + date,
+    /// sorted by final_score desc.
     pub fn get_daily_leaderboard(
         &self,
         guild_id: u64,
         date: &str,
     ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id, u.username, s.score1, s.score2, s.score3, s.score4, s.score5, s.final_score
+            "SELECT s.user_id, u.username,
+                    s.score1, s.score2, s.score3, s.score4, s.score5, s.final_score
              FROM scores s
              JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1 AND s.date = ?2
+             WHERE s.guild_id = ?1 AND s.date = ?2 AND s.mode = 'daily_default'
              ORDER BY s.final_score DESC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
@@ -117,13 +190,14 @@ impl Database {
                 score4: row.get::<_, i64>(5)? as f64,
                 score5: row.get::<_, i64>(6)? as f64,
                 final_score: row.get::<_, i64>(7)? as f64,
+                time_spent_ms: None,
             })
         })?;
         rows.collect()
     }
 
-    /// Permanent leaderboard: average scores across all days for a given guild,
-    /// sorted by average final_score desc.
+    /// Permanent leaderboard (default mode): average scores across all days for a given
+    /// guild, sorted by average final_score desc.
     pub fn get_permanent_leaderboard(
         &self,
         guild_id: u64,
@@ -131,15 +205,15 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT s.user_id,
                     u.username,
-                    AVG(s.score1) as avg_s1,
-                    AVG(s.score2) as avg_s2,
-                    AVG(s.score3) as avg_s3,
-                    AVG(s.score4) as avg_s4,
-                    AVG(s.score5) as avg_s5,
-                    AVG(s.final_score) as avg_final
+                    AVG(s.score1)       as avg_s1,
+                    AVG(s.score2)       as avg_s2,
+                    AVG(s.score3)       as avg_s3,
+                    AVG(s.score4)       as avg_s4,
+                    AVG(s.score5)       as avg_s5,
+                    AVG(s.final_score)  as avg_final
              FROM scores s
              JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1
+             WHERE s.guild_id = ?1 AND s.mode = 'daily_default'
              GROUP BY s.user_id
              ORDER BY avg_final DESC",
         )?;
@@ -153,6 +227,77 @@ impl Database {
                 score4: row.get(5)?,
                 score5: row.get(6)?,
                 final_score: row.get(7)?,
+                time_spent_ms: None,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Daily challenge leaderboard: all challenge scores for a given guild + date,
+    /// sorted by final_score desc, then time_spent_ms asc (faster is better).
+    pub fn get_daily_challenge_leaderboard(
+        &self,
+        guild_id: u64,
+        date: &str,
+    ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.user_id, u.username,
+                    s.score1, s.score2, s.score3, s.score4, s.score5,
+                    s.final_score, s.time_spent_ms
+             FROM scores s
+             JOIN users u ON s.user_id = u.user_id
+             WHERE s.guild_id = ?1 AND s.date = ?2 AND s.mode = 'daily_challenge'
+             ORDER BY s.final_score DESC, s.time_spent_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
+            Ok(LeaderboardRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                score1: row.get::<_, i64>(2)? as f64,
+                score2: row.get::<_, i64>(3)? as f64,
+                score3: row.get::<_, i64>(4)? as f64,
+                score4: row.get::<_, i64>(5)? as f64,
+                score5: row.get::<_, i64>(6)? as f64,
+                final_score: row.get::<_, i64>(7)? as f64,
+                time_spent_ms: row.get::<_, Option<i64>>(8)?.map(|v| v as f64),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Permanent challenge leaderboard: average scores + average time across all
+    /// challenge days for a given guild, sorted by avg final_score desc.
+    pub fn get_permanent_challenge_leaderboard(
+        &self,
+        guild_id: u64,
+    ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.user_id,
+                    u.username,
+                    AVG(s.score1)         as avg_s1,
+                    AVG(s.score2)         as avg_s2,
+                    AVG(s.score3)         as avg_s3,
+                    AVG(s.score4)         as avg_s4,
+                    AVG(s.score5)         as avg_s5,
+                    AVG(s.final_score)    as avg_final,
+                    AVG(s.time_spent_ms)  as avg_time
+             FROM scores s
+             JOIN users u ON s.user_id = u.user_id
+             WHERE s.guild_id = ?1 AND s.mode = 'daily_challenge'
+             GROUP BY s.user_id
+             ORDER BY avg_final DESC",
+        )?;
+        let rows = stmt.query_map(params![guild_id.to_string()], |row| {
+            Ok(LeaderboardRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                score1: row.get(2)?,
+                score2: row.get(3)?,
+                score3: row.get(4)?,
+                score4: row.get(5)?,
+                score5: row.get(6)?,
+                final_score: row.get(7)?,
+                time_spent_ms: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -174,10 +319,14 @@ mod tests {
         day: u32,
         scores: [u32; 5],
         final_score: u32,
+        mode: GameMode,
+        time_spent_ms: Option<u32>,
     ) -> MaptapScore {
         MaptapScore {
             user_id,
             guild_id: Some(guild_id),
+            mode,
+            time_spent_ms,
             date: NaiveDate::from_ymd_opt(2026, 4, day).unwrap(),
             scores,
             final_score,
@@ -185,7 +334,7 @@ mod tests {
         }
     }
 
-    /// Helper: upsert user then score
+    /// Helper: upsert user then default-mode score
     fn insert_score(
         db: &Database,
         user_id: u64,
@@ -196,8 +345,40 @@ mod tests {
     ) {
         db.upsert_user(user_id, &format!("user{}", user_id))
             .unwrap();
-        db.upsert_score(&make_score(user_id, guild_id, day, scores, final_score))
+        db.upsert_score(&make_score(
+            user_id,
+            guild_id,
+            day,
+            scores,
+            final_score,
+            GameMode::DailyDefault,
+            None,
+        ))
+        .unwrap();
+    }
+
+    /// Helper: upsert user then challenge-mode score
+    fn insert_challenge_score(
+        db: &Database,
+        user_id: u64,
+        guild_id: u64,
+        day: u32,
+        scores: [u32; 5],
+        final_score: u32,
+        time_spent_ms: u32,
+    ) {
+        db.upsert_user(user_id, &format!("user{}", user_id))
             .unwrap();
+        db.upsert_score(&make_score(
+            user_id,
+            guild_id,
+            day,
+            scores,
+            final_score,
+            GameMode::DailyChallenge,
+            Some(time_spent_ms),
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -226,6 +407,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].final_score, 823.0);
         assert_eq!(results[0].username, "user1");
+        assert_eq!(results[0].time_spent_ms, None);
     }
 
     #[test]
@@ -297,5 +479,78 @@ mod tests {
 
         let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
         assert_eq!(results[0].username, "new_name");
+    }
+
+    // ── Challenge leaderboard tests ──────────────────────────────
+
+    #[test]
+    fn test_challenge_daily_leaderboard() {
+        let db = test_db();
+        // user1: score 914 in 21100ms
+        insert_challenge_score(&db, 1, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+        // user2: same score but slower
+        insert_challenge_score(&db, 2, 100, 13, [89, 82, 94, 88, 97], 914, 25000);
+
+        let results = db
+            .get_daily_challenge_leaderboard(100, "2026-04-13")
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // Same final score → ordered by time (faster first)
+        assert_eq!(results[0].user_id, "1");
+        assert_eq!(results[0].time_spent_ms, Some(21100.0));
+        assert_eq!(results[1].user_id, "2");
+    }
+
+    #[test]
+    fn test_challenge_default_scores_not_mixed() {
+        let db = test_db();
+        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
+        insert_challenge_score(&db, 2, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+
+        let default_results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+        assert_eq!(default_results.len(), 1);
+        assert_eq!(default_results[0].user_id, "1");
+
+        let challenge_results = db
+            .get_daily_challenge_leaderboard(100, "2026-04-13")
+            .unwrap();
+        assert_eq!(challenge_results.len(), 1);
+        assert_eq!(challenge_results[0].user_id, "2");
+    }
+
+    #[test]
+    fn test_challenge_permanent_leaderboard_averages() {
+        let db = test_db();
+        // user1: two days, 914 and 800
+        insert_challenge_score(&db, 1, 100, 12, [89, 82, 94, 88, 97], 914, 21100);
+        insert_challenge_score(&db, 1, 100, 13, [80, 80, 80, 80, 80], 800, 30000);
+        // user2: one day, 900
+        insert_challenge_score(&db, 2, 100, 12, [85, 85, 90, 85, 90], 900, 18000);
+
+        let results = db.get_permanent_challenge_leaderboard(100).unwrap();
+        assert_eq!(results.len(), 2);
+        // user2 (avg 900) > user1 (avg 857)
+        assert_eq!(results[0].user_id, "2");
+        assert_eq!(results[0].time_spent_ms, Some(18000.0));
+        assert_eq!(results[1].user_id, "1");
+        // avg time for user1: (21100 + 30000) / 2 = 25550
+        assert_eq!(results[1].time_spent_ms, Some(25550.0));
+    }
+
+    #[test]
+    fn test_same_user_can_have_both_modes_same_day() {
+        let db = test_db();
+        insert_score(&db, 1, 100, 13, [93, 90, 83, 61, 97], 823);
+        insert_challenge_score(&db, 1, 100, 13, [89, 82, 94, 88, 97], 914, 21100);
+
+        let default_results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+        assert_eq!(default_results.len(), 1);
+        assert_eq!(default_results[0].final_score, 823.0);
+
+        let challenge_results = db
+            .get_daily_challenge_leaderboard(100, "2026-04-13")
+            .unwrap();
+        assert_eq!(challenge_results.len(), 1);
+        assert_eq!(challenge_results[0].final_score, 914.0);
     }
 }
