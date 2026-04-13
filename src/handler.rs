@@ -19,13 +19,17 @@ pub struct Handler {
     /// Tracks the last posted leaderboard message per (guild_id, command_name).
     /// Used to delete the previous message before posting a new one.
     leaderboard_msgs: std::sync::Mutex<HashMap<(u64, &'static str), (ChannelId, MessageId)>>,
+    /// Optional allowlist of channel IDs. When `Some`, only messages from these
+    /// channels are parsed. When `None`, all channels are processed.
+    channel_ids: Option<Vec<u64>>,
 }
 
 impl Handler {
-    pub fn new(db: Database) -> Self {
+    pub fn new(db: Database, channel_ids: Option<Vec<u64>>) -> Self {
         Self {
             db: std::sync::Mutex::new(db),
             leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
+            channel_ids,
         }
     }
 
@@ -132,6 +136,13 @@ impl EventHandler for Handler {
         // Ignore messages from bots (including ourselves)
         if msg.author.bot {
             return;
+        }
+
+        // If a channel allowlist is configured, ignore messages from other channels.
+        if let Some(ref ids) = self.channel_ids {
+            if !ids.contains(&msg.channel_id.get()) {
+                return;
+            }
         }
 
         let user_id = msg.author.id.get();

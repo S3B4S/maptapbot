@@ -19,12 +19,29 @@ async fn main() {
     let db = db::Database::open(&db_path).expect("Failed to open database");
     info!("Database initialized at {}", db_path);
 
+    // Parse optional comma-separated channel ID allowlist.
+    let channel_ids: Option<Vec<u64>> = std::env::var("DISCORD_CHANNEL_IDS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            s.split(',')
+                .filter_map(|id| id.trim().parse::<u64>().ok())
+                .collect()
+        })
+        .filter(|v: &Vec<u64>| !v.is_empty());
+
+    if let Some(ref ids) = channel_ids {
+        info!("Channel filter active: {:?}", ids);
+    } else {
+        info!("No channel filter set — processing messages from all channels");
+    }
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler::new(db))
+        .event_handler(Handler::new(db, channel_ids))
         .await
         .expect("Failed to create Discord client");
 
