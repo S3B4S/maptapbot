@@ -1,4 +1,6 @@
 use serenity::async_trait;
+use serenity::builder::{CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage};
+use serenity::model::application::Interaction;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
@@ -87,7 +89,40 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
+
+        // Register slash commands globally
+        let today_cmd = CreateCommand::new("today")
+            .description("Get a link to today's maptap challenge");
+
+        if let Err(e) = serenity::model::application::Command::set_global_commands(
+            &ctx.http,
+            vec![today_cmd],
+        )
+        .await
+        {
+            error!("Failed to register slash commands: {}", e);
+        } else {
+            info!("Slash commands registered");
+        }
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(cmd) = interaction {
+            match cmd.data.name.as_str() {
+                "today" => {
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Today's challenge: https://maptap.gg/")
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /today: {}", e);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
