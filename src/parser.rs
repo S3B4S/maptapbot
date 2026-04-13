@@ -14,7 +14,11 @@ use crate::models::MaptapScore;
 /// Returns None if the message doesn't contain a maptap block.
 /// Returns Some(Err) if it looks like a maptap block but has validation issues.
 /// Returns Some(Ok) if parsing and validation both succeed.
-pub fn parse_maptap_message(user_id: u64, content: &str) -> Option<Result<MaptapScore, String>> {
+pub fn parse_maptap_message(
+    user_id: u64,
+    guild_id: Option<u64>,
+    content: &str,
+) -> Option<Result<MaptapScore, String>> {
     let lines: Vec<&str> = content.trim().lines().collect();
     if lines.len() < 3 {
         return None;
@@ -58,6 +62,7 @@ pub fn parse_maptap_message(user_id: u64, content: &str) -> Option<Result<Maptap
     let raw_message = format!("{}\n{}\n{}", header_portion, scores_line, final_line);
     let score = MaptapScore {
         user_id,
+        guild_id,
         date,
         scores,
         final_score,
@@ -121,8 +126,12 @@ fn parse_header(line: &str) -> Option<NaiveDate> {
 
 fn parse_scores_line(line: &str) -> Result<[u32; 5], String> {
     // Line like: "93🏆 90👑 83😁 61🫢 97🔥"
-    // Each token is <digits><emoji(s)>. No trailing text allowed after the last token.
+    // Each token is <digits><emoji(s)>. No text allowed before or after the score tokens.
     //
+    // Reject leading text: line must start with a digit (after trimming whitespace).
+    if line.is_empty() || !line.chars().next().unwrap().is_ascii_digit() {
+        return Err("Scores line must start with a digit".to_string());
+    }
     // Strategy: extract numeric sequences. After the last digit->emoji transition,
     // only whitespace (or end of string) is allowed — no ASCII letters.
     let mut scores = Vec::new();
@@ -189,24 +198,27 @@ fn parse_final_score(line: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
+    const G: Option<u64> = Some(100);
+
     // ── Basic valid ──────────────────────────────────────────────
 
     #[test]
     fn test_parse_valid_message() {
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        let result = parse_maptap_message(12345, msg);
+        let result = parse_maptap_message(12345, G, msg);
         assert!(result.is_some());
         let score = result.unwrap().unwrap();
         assert_eq!(score.scores, [93, 90, 83, 61, 97]);
         assert_eq!(score.final_score, 823);
         assert_eq!(score.date.month(), 4);
         assert_eq!(score.date.day(), 13);
+        assert_eq!(score.guild_id, G);
     }
 
     #[test]
     fn test_parse_not_maptap() {
         let msg = "hello world";
-        assert!(parse_maptap_message(1, msg).is_none());
+        assert!(parse_maptap_message(1, G, msg).is_none());
     }
 
     // ── Validation errors ────────────────────────────────────────
@@ -214,7 +226,7 @@ mod tests {
     #[test]
     fn test_parse_wrong_score_count() {
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁\nFinal score: 823";
-        let result = parse_maptap_message(1, msg);
+        let result = parse_maptap_message(1, G, msg);
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
     }
@@ -222,7 +234,7 @@ mod tests {
     #[test]
     fn test_parse_final_score_mismatch() {
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 999";
-        let result = parse_maptap_message(1, msg);
+        let result = parse_maptap_message(1, G, msg);
         assert!(result.is_some());
         let err = result.unwrap().unwrap_err();
         assert!(err.contains("mismatch"));
@@ -231,7 +243,7 @@ mod tests {
     #[test]
     fn test_parse_score_out_of_range() {
         let msg = "www.maptap.gg April 13\n150🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        let result = parse_maptap_message(1, msg);
+        let result = parse_maptap_message(1, G, msg);
         assert!(result.is_some());
         let err = result.unwrap().unwrap_err();
         assert!(err.contains("must be 0-100"));
@@ -243,7 +255,7 @@ mod tests {
     fn test_text_before_on_separate_line() {
         let msg =
             "this is horrible\nwww.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert_eq!(score.final_score, 823);
     }
 
@@ -251,7 +263,7 @@ mod tests {
     fn test_text_before_on_same_line() {
         let msg =
             "this is horrible www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert_eq!(score.final_score, 823);
     }
 
@@ -261,7 +273,7 @@ mod tests {
     fn test_text_after_on_separate_line() {
         let msg =
             "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823\nthis is amazing";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert_eq!(score.final_score, 823);
     }
 
@@ -269,7 +281,7 @@ mod tests {
     fn test_text_after_on_same_line_as_final_score() {
         let msg =
             "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823 this is amazing";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert_eq!(score.final_score, 823);
     }
 
@@ -277,16 +289,22 @@ mod tests {
 
     #[test]
     fn test_invalid_text_after_header_on_same_line() {
-        // "www.maptap.gg April 13 This sucks" — extra words after day
         let msg = "www.maptap.gg April 13 This sucks\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        assert!(parse_maptap_message(1, msg).is_none());
+        assert!(parse_maptap_message(1, G, msg).is_none());
     }
 
     #[test]
     fn test_invalid_text_after_scores_on_same_line() {
-        // scores line has trailing text
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥 wow I did so well today\nFinal score: 823";
-        let result = parse_maptap_message(1, msg);
+        let result = parse_maptap_message(1, G, msg);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_invalid_text_before_scores_on_same_line() {
+        let msg = "www.maptap.gg April 13\nnahh I'm embarrassed 93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
+        let result = parse_maptap_message(1, G, msg);
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
     }
@@ -296,7 +314,7 @@ mod tests {
     #[test]
     fn test_raw_message_exact_content() {
         let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert_eq!(
             score.raw_message,
             "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823"
@@ -306,7 +324,7 @@ mod tests {
     #[test]
     fn test_raw_message_excludes_surrounding_text() {
         let msg = "Hey everyone!\nwww.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823\nSee you tomorrow";
-        let score = parse_maptap_message(1, msg).unwrap().unwrap();
+        let score = parse_maptap_message(1, G, msg).unwrap().unwrap();
         assert!(!score.raw_message.contains("Hey everyone"));
         assert!(!score.raw_message.contains("See you tomorrow"));
     }
@@ -316,6 +334,6 @@ mod tests {
     #[test]
     fn test_header_not_enough_lines_after() {
         let msg = "some text\nmore text\nwww.maptap.gg April 13";
-        assert!(parse_maptap_message(1, msg).is_none());
+        assert!(parse_maptap_message(1, G, msg).is_none());
     }
 }

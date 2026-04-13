@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 #[derive(Debug, Clone)]
 pub struct MaptapScore {
     pub user_id: u64,
+    pub guild_id: Option<u64>,
     pub date: NaiveDate,
     pub scores: [u32; 5],
     pub final_score: u32,
@@ -54,6 +55,7 @@ mod tests {
     fn make_score(scores: [u32; 5], final_score: u32) -> MaptapScore {
         MaptapScore {
             user_id: 1,
+            guild_id: Some(100),
             date: NaiveDate::from_ymd_opt(2026, 4, 13).unwrap(),
             scores,
             final_score,

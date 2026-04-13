@@ -89,6 +89,31 @@ Final score: <final-score>
 Through discord you can get an ID for an user. Use this ID to match the user to a score they posted.
 A user can only post 1 score for each day. If an user posts multiple (valid) scores for 1 day, assume that the latest post wins and overwrites the previous score.
 
+The guild the msg comes from should also be stored.
+
+2 tables, 1 for scores, and 1 for user info
+
+Messages;
+- `user_id`
+- `guild_id`
+- `date`
+- `score1`
+- `score2`
+- `score3`
+- `score4`
+- `score5`
+- `final_score`
+- `raw_message` (parsed & sanitized)
+- `created_at`
+
+Key is `user_id` + `guild_id` + `date`
+
+Users:
+- `user_id`
+- `guild_id`
+
+Key is `user_id`
+
 Let's start by just storing these scores in a small local DB.
 
 ## Tech stack
