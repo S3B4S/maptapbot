@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serenity::async_trait;
 use serenity::builder::{
     CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -5,6 +7,7 @@ use serenity::builder::{
 use serenity::model::application::Interaction;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
+use serenity::model::id::{ChannelId, MessageId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
@@ -13,12 +16,112 @@ use crate::parser::{parse_challenge_message, parse_maptap_message};
 
 pub struct Handler {
     db: std::sync::Mutex<Database>,
+    /// Tracks the last posted leaderboard message per (guild_id, command_name).
+    /// Used to delete the previous message before posting a new one.
+    leaderboard_msgs: std::sync::Mutex<HashMap<(u64, &'static str), (ChannelId, MessageId)>>,
 }
 
 impl Handler {
     pub fn new(db: Database) -> Self {
         Self {
             db: std::sync::Mutex::new(db),
+            leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Look up and remove the previous leaderboard message for (guild_id, cmd).
+    fn take_prev_leaderboard_msg(
+        &self,
+        guild_id: u64,
+        cmd: &'static str,
+    ) -> Option<(ChannelId, MessageId)> {
+        self.leaderboard_msgs
+            .lock()
+            .ok()?
+            .remove(&(guild_id, cmd))
+    }
+
+    /// Store the new leaderboard message for (guild_id, cmd).
+    fn store_leaderboard_msg(
+        &self,
+        guild_id: u64,
+        cmd: &'static str,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
+        if let Ok(mut map) = self.leaderboard_msgs.lock() {
+            map.insert((guild_id, cmd), (channel_id, message_id));
+        }
+    }
+
+    fn build_leaderboard_content(&self, name: &str, gid: u64) -> String {
+        let db = self.db.lock().unwrap();
+        match name {
+            "leaderboard_daily" => {
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                db.get_daily_leaderboard(gid, &today)
+                    .map(|rows| {
+                        if rows.is_empty() {
+                            "No scores recorded for today yet!".to_string()
+                        } else {
+                            format_leaderboard_table("Daily Leaderboard", &rows, false)
+                        }
+                    })
+                    .unwrap_or_else(|e| {
+                        error!("DB error: {}", e);
+                        "Internal error fetching leaderboard.".to_string()
+                    })
+            }
+            "leaderboard_permanent" => db
+                .get_permanent_leaderboard(gid)
+                .map(|rows| {
+                    if rows.is_empty() {
+                        "No scores recorded yet!".to_string()
+                    } else {
+                        format_leaderboard_table("Permanent Leaderboard (Averages)", &rows, true)
+                    }
+                })
+                .unwrap_or_else(|e| {
+                    error!("DB error: {}", e);
+                    "Internal error fetching leaderboard.".to_string()
+                }),
+            "leaderboard_challenge_daily" => {
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                db.get_daily_challenge_leaderboard(gid, &today)
+                    .map(|rows| {
+                        if rows.is_empty() {
+                            "No challenge scores recorded for today yet!".to_string()
+                        } else {
+                            format_challenge_leaderboard_table(
+                                "Daily Challenge Leaderboard",
+                                &rows,
+                                false,
+                            )
+                        }
+                    })
+                    .unwrap_or_else(|e| {
+                        error!("DB error: {}", e);
+                        "Internal error fetching leaderboard.".to_string()
+                    })
+            }
+            "leaderboard_challenge_permanent" => db
+                .get_permanent_challenge_leaderboard(gid)
+                .map(|rows| {
+                    if rows.is_empty() {
+                        "No challenge scores recorded yet!".to_string()
+                    } else {
+                        format_challenge_leaderboard_table(
+                            "Permanent Challenge Leaderboard (Averages)",
+                            &rows,
+                            true,
+                        )
+                    }
+                })
+                .unwrap_or_else(|e| {
+                    error!("DB error: {}", e);
+                    "Internal error fetching leaderboard.".to_string()
+                }),
+            _ => "Unknown leaderboard command.".to_string(),
         }
     }
 }
@@ -78,11 +181,8 @@ impl EventHandler for Handler {
                     mode_label, msg.author.name, date_str, final_score
                 );
 
-                let reply = format!(
-                    "Recorded! {} scored **{}** on {} ({})",
-                    msg.author.name, final_score, date_str, mode_label
-                );
-                let _ = msg.reply(&ctx.http, reply).await;
+                // React with 🗺️ instead of sending a reply message.
+                let _ = msg.react(&ctx.http, '🗺').await;
             }
             Err(e) => {
                 warn!("Invalid maptap message from {}: {}", msg.author.name, e);
@@ -131,117 +231,48 @@ impl EventHandler for Handler {
                         error!("Failed to respond to /today: {}", e);
                     }
                 }
-                "leaderboard_daily" => {
-                    let content = guild_only_leaderboard(guild_id, || {
-                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                        let db = self.db.lock().unwrap();
-                        db.get_daily_leaderboard(guild_id.unwrap(), &today)
-                            .map(|rows| {
-                                if rows.is_empty() {
-                                    "No scores recorded for today yet!".to_string()
-                                } else {
-                                    format_leaderboard_table("Daily Leaderboard", &rows, false)
-                                }
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("DB error: {}", e);
-                                "Internal error fetching leaderboard.".to_string()
-                            })
-                    });
+                name @ ("leaderboard_daily"
+                | "leaderboard_permanent"
+                | "leaderboard_challenge_daily"
+                | "leaderboard_challenge_permanent") => {
+                    let Some(gid) = guild_id else {
+                        let _ = cmd
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("This command can only be used in a server.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    };
+
+                    let content = self.build_leaderboard_content(name, gid);
+                    let cmd_key = cmd_name_key(name);
+
+                    // Delete the previous leaderboard message for this command, if any.
+                    if let Some((ch_id, msg_id)) = self.take_prev_leaderboard_msg(gid, cmd_key) {
+                        let _ = ctx.http.delete_message(ch_id, msg_id, None).await;
+                    }
 
                     let response = CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new().content(content),
                     );
                     if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /leaderboard_daily: {}", e);
+                        error!("Failed to respond to /{}: {}", name, e);
+                        return;
                     }
-                }
-                "leaderboard_permanent" => {
-                    let content = guild_only_leaderboard(guild_id, || {
-                        let db = self.db.lock().unwrap();
-                        db.get_permanent_leaderboard(guild_id.unwrap())
-                            .map(|rows| {
-                                if rows.is_empty() {
-                                    "No scores recorded yet!".to_string()
-                                } else {
-                                    format_leaderboard_table(
-                                        "Permanent Leaderboard (Averages)",
-                                        &rows,
-                                        true,
-                                    )
-                                }
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("DB error: {}", e);
-                                "Internal error fetching leaderboard.".to_string()
-                            })
-                    });
 
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(content),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /leaderboard_permanent: {}", e);
-                    }
-                }
-                "leaderboard_challenge_daily" => {
-                    let content = guild_only_leaderboard(guild_id, || {
-                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                        let db = self.db.lock().unwrap();
-                        db.get_daily_challenge_leaderboard(guild_id.unwrap(), &today)
-                            .map(|rows| {
-                                if rows.is_empty() {
-                                    "No challenge scores recorded for today yet!".to_string()
-                                } else {
-                                    format_challenge_leaderboard_table(
-                                        "Daily Challenge Leaderboard",
-                                        &rows,
-                                        false,
-                                    )
-                                }
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("DB error: {}", e);
-                                "Internal error fetching leaderboard.".to_string()
-                            })
-                    });
-
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(content),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /leaderboard_challenge_daily: {}", e);
-                    }
-                }
-                "leaderboard_challenge_permanent" => {
-                    let content = guild_only_leaderboard(guild_id, || {
-                        let db = self.db.lock().unwrap();
-                        db.get_permanent_challenge_leaderboard(guild_id.unwrap())
-                            .map(|rows| {
-                                if rows.is_empty() {
-                                    "No challenge scores recorded yet!".to_string()
-                                } else {
-                                    format_challenge_leaderboard_table(
-                                        "Permanent Challenge Leaderboard (Averages)",
-                                        &rows,
-                                        true,
-                                    )
-                                }
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("DB error: {}", e);
-                                "Internal error fetching leaderboard.".to_string()
-                            })
-                    });
-
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(content),
-                    );
-                    if let Err(e) = cmd
-                        .create_response(&ctx.http, response)
-                        .await
-                    {
-                        error!("Failed to respond to /leaderboard_challenge_permanent: {}", e);
+                    // Retrieve the posted message so we can store its ID for later deletion.
+                    match cmd.get_response(&ctx.http).await {
+                        Ok(posted) => {
+                            self.store_leaderboard_msg(gid, cmd_key, posted.channel_id, posted.id);
+                        }
+                        Err(e) => {
+                            error!("Failed to retrieve response message for /{}: {}", name, e);
+                        }
                     }
                 }
                 _ => {}
@@ -250,13 +281,14 @@ impl EventHandler for Handler {
     }
 }
 
-/// Guard that returns "server-only" message if guild_id is None,
-/// otherwise calls `f` to produce the leaderboard content.
-fn guild_only_leaderboard<F: FnOnce() -> String>(guild_id: Option<u64>, f: F) -> String {
-    if guild_id.is_none() {
-        "This command can only be used in a server.".to_string()
-    } else {
-        f()
+/// Map a runtime command name string to a `'static str` key for the HashMap.
+fn cmd_name_key(name: &str) -> &'static str {
+    match name {
+        "leaderboard_daily" => "leaderboard_daily",
+        "leaderboard_permanent" => "leaderboard_permanent",
+        "leaderboard_challenge_daily" => "leaderboard_challenge_daily",
+        "leaderboard_challenge_permanent" => "leaderboard_challenge_permanent",
+        _ => unreachable!("cmd_name_key called with unexpected name: {}", name),
     }
 }
 
@@ -309,7 +341,6 @@ fn format_leaderboard_table(title: &str, rows: &[LeaderboardRow], averages: bool
 
 /// Format a challenge leaderboard table as a Discord code block.
 /// Adds a Time column after Total.
-/// If `averages` is true, scores shown with 1 decimal place and time as avg seconds.
 fn format_challenge_leaderboard_table(
     title: &str,
     rows: &[LeaderboardRow],
