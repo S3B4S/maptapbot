@@ -15,8 +15,9 @@ async fn main() {
 
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set in .env");
 
-    let db = db::Database::open("maptap.db").expect("Failed to open database");
-    info!("Database initialized");
+    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "maptap.db".to_string());
+    let db = db::Database::open(&db_path).expect("Failed to open database");
+    info!("Database initialized at {}", db_path);
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
