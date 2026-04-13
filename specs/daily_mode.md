@@ -41,13 +41,42 @@ Shows today's scores only, scoped to the current guild. Sorted descendingly by t
 
 Shows all-time scores, scoped to the current guild. Averages each score column across all entries. Sorted descendingly by total score. Empty state: `"No scores recorded yet!"`
 
-### Table format
+### Response format
 
-Both commands render a fixed-width table in a Discord code block:
+Both commands post a **public Discord embed**:
 
-| Column | Width | Notes |
-|---|---|---|
-| `#` | 4, left-aligned | Rank |
-| `User` | 20, left-aligned | Truncated to 18 chars + `..` if over limit |
-| `S1`–`S5` | 5, right-aligned | Individual scores |
-| `Total` | 7, right-aligned | Daily: integer; Permanent: 1 decimal average |
+**Embed — summary view**
+
+| Property | Value |
+|---|---|
+| Title | `Daily Leaderboard` / `Permanent Leaderboard` |
+| Color | Gold — `#FFD700` |
+| Description | Header line (see below) |
+| Field: `Top 3` | Medal entries (see below) |
+| Field: `Bottom 3` | Skull entries (see below); omitted if total entries ≤ 3 |
+
+**Description (header line)**
+- Daily: `<Weekday, Month Day> · <N> players submitted · https://maptap.gg`
+  - e.g. `Tuesday, April 15 · 8 players submitted · https://maptap.gg`
+- Permanent: `All-time · <N> players · https://maptap.gg`
+
+**Field: Top 3** (sorted descending, left to right)
+```
+🥇 alice (823)  🥈 bob (812)  🥉 charlie (799)
+```
+- Format per entry: `<medal> <username> (<total_score>)`
+- If fewer than 3 entries, show only however many exist.
+
+**Field: Bottom 3** (sorted ascending from worst, left to right: rank N, N-1, N-2)
+```
+💀 dave (341)  💀 eve (298)  💀 frank (201)
+```
+- Only shown if total entries > 3.
+- If entries > 3 but < 6, show however many entries are not already in the top 3 (no overlap).
+
+### Buttons (ephemeral, invoker-only)
+
+After posting the public embed, the bot sends a **private ephemeral follow-up** to the command invoker containing two buttons:
+
+- **"Full leaderboard"**: Creates a public thread on the summary message and posts a full embed (same color and title, all entries listed in ranked order) there.
+- **"Remove"**: Deletes the public summary embed.
