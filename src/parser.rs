@@ -44,6 +44,10 @@ pub fn parse_maptap_message(
     }
 
     let date = parse_header(&header_portion)?;
+    let date = match check_date_not_future(date) {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e)),
+    };
 
     // Line 2 (scores): must be the entire line — no extra text allowed
     let scores_line = lines[header_idx + 1].trim();
@@ -122,6 +126,10 @@ pub fn parse_challenge_message(
     let date = match parse_challenge_header(header_line) {
         Some(d) => d,
         None => return None,
+    };
+    let date = match check_date_not_future(date) {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e)),
     };
 
     // Scores line
@@ -238,6 +246,16 @@ fn extract_header_portion(line: &str) -> Option<String> {
     parse_month(parts[0])?;
     parts[1].parse::<u32>().ok()?;
     Some(portion.to_string())
+}
+
+/// Returns Ok(date) if `date` is today or in the past, Err otherwise.
+fn check_date_not_future(date: NaiveDate) -> Result<NaiveDate, String> {
+    let today = Utc::now().date_naive();
+    if date > today {
+        Err("Date cannot be in the future".to_string())
+    } else {
+        Ok(date)
+    }
 }
 
 /// Parse month name — accepts both full names (April) and abbreviations (Apr).
@@ -630,5 +648,78 @@ mod tests {
     fn test_parse_month_full() {
         assert_eq!(parse_month("January"), Some(1));
         assert_eq!(parse_month("April"), Some(4));
+    }
+
+    // ── Future date rejection ────────────────────────────────────
+
+    #[test]
+    fn test_daily_future_date_rejected() {
+        // Build a message with tomorrow's date to ensure it's always in the future.
+        let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
+        let month_name = tomorrow.format("%B").to_string(); // e.g. "April"
+        let day = tomorrow.day();
+        // Compute a valid score for the formula: s1=10,s2=10,s3=10,s4=10,s5=10 → (10+10)*1 + 10*2 + (10+10)*3 = 20+20+60 = 100
+        let msg = format!(
+            "www.maptap.gg {} {}\n10🏆 10👑 10😁 10🫢 10🔥\nFinal score: 100",
+            month_name, day
+        );
+        let result = parse_maptap_message(1, G, &msg);
+        assert!(result.is_some(), "should be recognized as a maptap block");
+        let err = result.unwrap().unwrap_err();
+        assert!(
+            err.contains("future"),
+            "expected future-date error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_challenge_future_date_rejected() {
+        let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
+        let month_abbr = tomorrow.format("%b").to_string(); // e.g. "Apr"
+        let day = tomorrow.day();
+        // s1=89,s2=82,s3=94,s4=88,s5=97 → (89+82)*1 + 94*2 + (88+97)*3 = 171+188+555 = 914
+        let msg = format!(
+            "⚡ MapTap Challenge Round - {} {}\nwww.maptap.gg/challenge\n89🎉 82✨ 94🏆 88🎓 97🏅\nScore: 914 in 21.1s (4.0s to spare!)",
+            month_abbr, day
+        );
+        let result = parse_challenge_message(1, G, &msg);
+        assert!(
+            result.is_some(),
+            "should be recognized as a challenge block"
+        );
+        let err = result.unwrap().unwrap_err();
+        assert!(
+            err.contains("future"),
+            "expected future-date error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_daily_today_date_accepted() {
+        // Today's date must not be rejected as future
+        let today = Utc::now().date_naive();
+        let month_name = today.format("%B").to_string();
+        let day = today.day();
+        let msg = format!(
+            "www.maptap.gg {} {}\n10🏆 10👑 10😁 10🫢 10🔥\nFinal score: 100",
+            month_name, day
+        );
+        let result = parse_maptap_message(1, G, &msg);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_ok(), "today's date should be accepted");
+    }
+
+    #[test]
+    fn test_challenge_today_date_accepted() {
+        let today = Utc::now().date_naive();
+        let month_abbr = today.format("%b").to_string();
+        let day = today.day();
+        let msg = format!(
+            "⚡ MapTap Challenge Round - {} {}\nwww.maptap.gg/challenge\n89🎉 82✨ 94🏆 88🎓 97🏅\nScore: 914 in 21.1s (4.0s to spare!)",
+            month_abbr, day
+        );
+        let result = parse_challenge_message(1, G, &msg);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_ok(), "today's date should be accepted");
     }
 }

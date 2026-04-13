@@ -29,6 +29,8 @@ Score: 509 in 25.0s (TIME UP!)
 
 See [shared score rules](./setup.md#shared-score-rules) in setup.md.
 
+See [generic date parsing](./setup.md#generic-date-parsing) in setup.md for date validation rules.
+
 A score value is either:
 - A digit string (`0`–`100`) — normal score
 - `--` — the tile was not completed in time; stored as `NULL` in the DB

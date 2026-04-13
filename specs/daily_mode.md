@@ -19,6 +19,8 @@ Final score: 823
 
 See [shared score rules](./setup.md#shared-score-rules) in setup.md.
 
+See [generic date parsing](./setup.md#generic-date-parsing) in setup.md for date validation rules.
+
 ## Database
 
 The `scores` table `mode` column value for this mode is `daily_default`.

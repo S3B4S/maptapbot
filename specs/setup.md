@@ -69,6 +69,11 @@ These apply to all modes:
 - Final score is calculated as: `(s1 + s2) * 1 + s3 * 2 + (s4 + s5) * 3`
 - The reported `final-score` in the message must match this formula exactly
 
+## Generic date parsing
+
+- The date in the message cannot be in the future; it must be today or an earlier date
+- If a future date is detected, treat it as a validation failure with reason: `"Date cannot be in the future"`
+
 ## Failure behavior
 
 | Scenario | Bot action |
