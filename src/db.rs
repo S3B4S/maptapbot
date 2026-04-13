@@ -18,6 +18,41 @@ pub struct LeaderboardRow {
     pub time_spent_ms: Option<f64>,
 }
 
+/// Row returned by admin score-listing queries.
+#[derive(Debug)]
+pub struct ScoreRow {
+    pub user_id: String,
+    pub username: String,
+    pub guild_id: Option<String>,
+    pub date: String,
+    pub mode: String,
+    pub score1: Option<i64>,
+    pub score2: Option<i64>,
+    pub score3: Option<i64>,
+    pub score4: Option<i64>,
+    pub score5: Option<i64>,
+    pub final_score: i64,
+    pub time_spent_ms: Option<i64>,
+}
+
+/// Row returned by list_users.
+#[derive(Debug)]
+pub struct UserRow {
+    pub user_id: String,
+    pub username: String,
+}
+
+/// Aggregate DB statistics.
+#[derive(Debug)]
+pub struct DbStats {
+    pub total_entries: i64,
+    pub unique_users: i64,
+    pub min_date: Option<String>,
+    pub max_date: Option<String>,
+    pub daily_default_count: i64,
+    pub daily_challenge_count: i64,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -339,6 +374,158 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    // ── Admin query methods ──────────────────────────────────────────────
+
+    /// Delete a specific score entry. Returns the number of rows deleted (0 or 1).
+    pub fn delete_score(
+        &self,
+        user_id: &str,
+        date: &str,
+        mode: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let deleted = self.conn.execute(
+            "DELETE FROM scores WHERE user_id = ?1 AND date = ?2 AND mode = ?3",
+            params![user_id, date, mode],
+        )?;
+        Ok(deleted)
+    }
+
+    /// List all scores for a given user across all dates and modes.
+    pub fn list_scores(&self, user_id: &str) -> Result<Vec<ScoreRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.user_id, COALESCE(u.username, s.user_id) as username,
+                    s.guild_id, s.date, s.mode,
+                    s.score1, s.score2, s.score3, s.score4, s.score5,
+                    s.final_score, s.time_spent_ms
+             FROM scores s
+             LEFT JOIN users u ON s.user_id = u.user_id
+             WHERE s.user_id = ?1
+             ORDER BY s.date DESC, s.mode",
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(ScoreRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                guild_id: row.get(2)?,
+                date: row.get(3)?,
+                mode: row.get(4)?,
+                score1: row.get(5)?,
+                score2: row.get(6)?,
+                score3: row.get(7)?,
+                score4: row.get(8)?,
+                score5: row.get(9)?,
+                final_score: row.get(10)?,
+                time_spent_ms: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Dump all scores in the table.
+    pub fn list_all_scores(&self) -> Result<Vec<ScoreRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.user_id, COALESCE(u.username, s.user_id) as username,
+                    s.guild_id, s.date, s.mode,
+                    s.score1, s.score2, s.score3, s.score4, s.score5,
+                    s.final_score, s.time_spent_ms
+             FROM scores s
+             LEFT JOIN users u ON s.user_id = u.user_id
+             ORDER BY s.date DESC, s.user_id, s.mode",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ScoreRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                guild_id: row.get(2)?,
+                date: row.get(3)?,
+                mode: row.get(4)?,
+                score1: row.get(5)?,
+                score2: row.get(6)?,
+                score3: row.get(7)?,
+                score4: row.get(8)?,
+                score5: row.get(9)?,
+                final_score: row.get(10)?,
+                time_spent_ms: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// List all known users.
+    pub fn list_users(&self) -> Result<Vec<UserRow>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT user_id, username FROM users ORDER BY username")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UserRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Return the raw stored message for a specific score entry.
+    pub fn raw_score(
+        &self,
+        user_id: &str,
+        date: &str,
+        mode: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT raw_message FROM scores WHERE user_id = ?1 AND date = ?2 AND mode = ?3",
+        )?;
+        let mut rows = stmt.query(params![user_id, date, mode])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete all scores for a given date. Returns the number of rows deleted.
+    pub fn clear_day(&self, date: &str) -> Result<usize, rusqlite::Error> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM scores WHERE date = ?1", params![date])?;
+        Ok(deleted)
+    }
+
+    /// Aggregate DB stats: total entries, unique users, date range, per-mode counts.
+    pub fn stats(&self) -> Result<DbStats, rusqlite::Error> {
+        let total_entries: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM scores", [], |row| row.get(0))?;
+        let unique_users: i64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT user_id) FROM scores", [], |row| {
+                    row.get(0)
+                })?;
+        let min_date: Option<String> =
+            self.conn
+                .query_row("SELECT MIN(date) FROM scores", [], |row| row.get(0))?;
+        let max_date: Option<String> =
+            self.conn
+                .query_row("SELECT MAX(date) FROM scores", [], |row| row.get(0))?;
+        let daily_default_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scores WHERE mode = 'daily_default'",
+            [],
+            |row| row.get(0),
+        )?;
+        let daily_challenge_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scores WHERE mode = 'daily_challenge'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(DbStats {
+            total_entries,
+            unique_users,
+            min_date,
+            max_date,
+            daily_default_count,
+            daily_challenge_count,
+        })
     }
 }
 

@@ -2,16 +2,17 @@ use std::collections::HashMap;
 
 use serenity::async_trait;
 use serenity::builder::{
-    CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseMessage,
 };
-use serenity::model::application::Interaction;
+use serenity::model::application::{CommandOptionType, Interaction};
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::db::{Database, LeaderboardRow};
+use crate::db::{Database, LeaderboardRow, ScoreRow};
 use crate::parser::{parse_challenge_message, parse_maptap_message};
 
 pub struct Handler {
@@ -22,14 +23,144 @@ pub struct Handler {
     /// Optional allowlist of channel IDs. When `Some`, only messages from these
     /// channels are parsed. When `None`, all channels are processed.
     channel_ids: Option<Vec<u64>>,
+    /// Discord user IDs that have admin privileges.
+    admin_ids: Vec<u64>,
 }
 
 impl Handler {
-    pub fn new(db: Database, channel_ids: Option<Vec<u64>>) -> Self {
+    pub fn new(db: Database, channel_ids: Option<Vec<u64>>, admin_ids: Vec<u64>) -> Self {
         Self {
             db: std::sync::Mutex::new(db),
             leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
             channel_ids,
+            admin_ids,
+        }
+    }
+
+    /// Check whether a Discord user ID is in the admin list.
+    fn is_admin(&self, user_id: u64) -> bool {
+        self.admin_ids.contains(&user_id)
+    }
+
+    /// Dispatch an admin command and return the response text.
+    fn handle_admin_command(
+        &self,
+        name: &str,
+        options: &[serenity::model::application::ResolvedOption<'_>],
+    ) -> String {
+        let get_str = |key: &str| -> Option<&str> {
+            options.iter().find_map(|o| {
+                if o.name == key {
+                    if let serenity::model::application::ResolvedValue::String(s) = o.value {
+                        return Some(s);
+                    }
+                }
+                None
+            })
+        };
+
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(e) => return format!("Internal error: failed to lock DB: {}", e),
+        };
+
+        match name {
+            "delete_score" => {
+                let Some(user_id) = get_str("user_id") else {
+                    return "Missing required parameter: user_id".to_string();
+                };
+                let Some(date) = get_str("date") else {
+                    return "Missing required parameter: date".to_string();
+                };
+                let Some(mode) = get_str("mode") else {
+                    return "Missing required parameter: mode".to_string();
+                };
+                match db.delete_score(user_id, date, mode) {
+                    Ok(0) => format!("No score found for user `{}` on `{}` (mode: `{}`).", user_id, date, mode),
+                    Ok(n) => format!("Deleted {} score(s) for user `{}` on `{}` (mode: `{}`).", n, user_id, date, mode),
+                    Err(e) => format!("DB error: {}", e),
+                }
+            }
+            "list_scores" => {
+                let Some(user_id) = get_str("user_id") else {
+                    return "Missing required parameter: user_id".to_string();
+                };
+                match db.list_scores(user_id) {
+                    Ok(rows) if rows.is_empty() => format!("No scores found for user `{}`.", user_id),
+                    Ok(rows) => format_score_rows(&rows),
+                    Err(e) => format!("DB error: {}", e),
+                }
+            }
+            "list_all_scores" => match db.list_all_scores() {
+                Ok(rows) if rows.is_empty() => "No scores in the database.".to_string(),
+                Ok(rows) => format_score_rows(&rows),
+                Err(e) => format!("DB error: {}", e),
+            },
+            "list_users" => match db.list_users() {
+                Ok(rows) if rows.is_empty() => "No users in the database.".to_string(),
+                Ok(rows) => {
+                    let mut out = format!("**Users ({} total)**\n```\n", rows.len());
+                    out.push_str(&format!("{:<22} {}\n", "User ID", "Username"));
+                    out.push_str(&"-".repeat(42));
+                    out.push('\n');
+                    for row in &rows {
+                        out.push_str(&format!("{:<22} {}\n", row.user_id, row.username));
+                    }
+                    out.push_str("```");
+                    truncate_message(out)
+                }
+                Err(e) => format!("DB error: {}", e),
+            },
+            "raw_score" => {
+                let Some(user_id) = get_str("user_id") else {
+                    return "Missing required parameter: user_id".to_string();
+                };
+                let Some(date) = get_str("date") else {
+                    return "Missing required parameter: date".to_string();
+                };
+                let Some(mode) = get_str("mode") else {
+                    return "Missing required parameter: mode".to_string();
+                };
+                match db.raw_score(user_id, date, mode) {
+                    Ok(Some(raw)) => format!("Raw message for `{}` on `{}` (`{}`):\n```\n{}\n```", user_id, date, mode, raw),
+                    Ok(None) => format!("No score found for user `{}` on `{}` (mode: `{}`).", user_id, date, mode),
+                    Err(e) => format!("DB error: {}", e),
+                }
+            }
+            "clear_day" => {
+                let Some(date) = get_str("date") else {
+                    return "Missing required parameter: date".to_string();
+                };
+                match db.clear_day(date) {
+                    Ok(0) => format!("No scores found for date `{}`.", date),
+                    Ok(n) => format!("Deleted {} score(s) for date `{}`.", n, date),
+                    Err(e) => format!("DB error: {}", e),
+                }
+            }
+            "stats" => match db.stats() {
+                Ok(stats) => {
+                    let date_range = match (&stats.min_date, &stats.max_date) {
+                        (Some(min), Some(max)) => format!("{} to {}", min, max),
+                        _ => "N/A".to_string(),
+                    };
+                    format!(
+                        "**DB Stats**\n```\n\
+                         Total entries:    {}\n\
+                         Unique users:     {}\n\
+                         Date range:       {}\n\
+                         daily_default:    {}\n\
+                         daily_challenge:  {}\n\
+                         ```",
+                        stats.total_entries,
+                        stats.unique_users,
+                        date_range,
+                        stats.daily_default_count,
+                        stats.daily_challenge_count,
+                    )
+                }
+                Err(e) => format!("DB error: {}", e),
+            },
+            _ => "Unknown admin command.".to_string(),
         }
     }
 
@@ -206,7 +337,33 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
+        let mode_option = || {
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "mode",
+                "Game mode (daily_default or daily_challenge)",
+            )
+            .required(true)
+            .add_string_choice("daily_default", "daily_default")
+            .add_string_choice("daily_challenge", "daily_challenge")
+        };
+
+        let user_id_option = |required: bool| {
+            CreateCommandOption::new(CommandOptionType::String, "user_id", "Discord user ID")
+                .required(required)
+        };
+
+        let date_option = |required: bool| {
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "date",
+                "Date in YYYY-MM-DD format",
+            )
+            .required(required)
+        };
+
         let commands = vec![
+            // User-facing commands
             CreateCommand::new("today").description("Get a link to today's maptap challenge"),
             CreateCommand::new("leaderboard_daily")
                 .description("Show today's leaderboard for this server"),
@@ -216,6 +373,27 @@ impl EventHandler for Handler {
                 .description("Show today's challenge leaderboard for this server"),
             CreateCommand::new("leaderboard_challenge_permanent")
                 .description("Show the all-time challenge leaderboard for this server"),
+            CreateCommand::new("help").description("Show available commands"),
+            // Admin commands
+            CreateCommand::new("delete_score")
+                .description("Delete a specific score entry")
+                .add_option(user_id_option(true))
+                .add_option(date_option(true))
+                .add_option(mode_option()),
+            CreateCommand::new("list_scores")
+                .description("Show all scores for a given user")
+                .add_option(user_id_option(true)),
+            CreateCommand::new("list_all_scores").description("Dump all scores in the database"),
+            CreateCommand::new("list_users").description("List all known users"),
+            CreateCommand::new("raw_score")
+                .description("Show the raw stored message for a score entry")
+                .add_option(user_id_option(true))
+                .add_option(date_option(true))
+                .add_option(mode_option()),
+            CreateCommand::new("clear_day")
+                .description("Wipe all scores for a given date")
+                .add_option(date_option(true)),
+            CreateCommand::new("stats").description("Show aggregate DB stats"),
         ];
 
         if let Err(e) =
@@ -230,6 +408,7 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(cmd) = interaction {
             let guild_id = cmd.guild_id.map(|g| g.get());
+            let invoker_id = cmd.user.id.get();
 
             match cmd.data.name.as_str() {
                 "today" => {
@@ -284,6 +463,40 @@ impl EventHandler for Handler {
                         Err(e) => {
                             error!("Failed to retrieve response message for /{}: {}", name, e);
                         }
+                    }
+                }
+                "help" => {
+                    let content = build_help_text(self.is_admin(invoker_id));
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(content)
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /help: {}", e);
+                    }
+                }
+                // ── Admin commands ───────────────────────────────────────
+                name @ ("delete_score" | "list_scores" | "list_all_scores" | "list_users"
+                | "raw_score" | "clear_day" | "stats") => {
+                    if !self.is_admin(invoker_id) {
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("You do not have permission to use this command.")
+                                .ephemeral(true),
+                        );
+                        let _ = cmd.create_response(&ctx.http, response).await;
+                        return;
+                    }
+
+                    let content = self.handle_admin_command(name, &cmd.data.options());
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(content)
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /{}: {}", name, e);
                     }
                 }
                 _ => {}
@@ -422,4 +635,71 @@ fn truncate_username(name: &str, max_len: usize) -> String {
         truncated.push_str("..");
         truncated
     }
+}
+
+/// Build the /help response text. Admin commands are included only when `is_admin` is true.
+fn build_help_text(is_admin: bool) -> String {
+    let mut text = String::from("**Available Commands**\n\n");
+    text.push_str("`/today` — Get a link to today's maptap challenge\n");
+    text.push_str("`/leaderboard_daily` — Show today's scores for this server\n");
+    text.push_str("`/leaderboard_permanent` — Show the all-time average scores for this server\n");
+    text.push_str(
+        "`/leaderboard_challenge_daily` — Show today's challenge scores for this server\n",
+    );
+    text.push_str("`/leaderboard_challenge_permanent` — Show the all-time challenge averages for this server\n");
+    text.push_str("`/help` — Show this help message\n");
+
+    if is_admin {
+        text.push_str("\n**Admin Commands**\n\n");
+        text.push_str("`/delete_score <user_id> <date> <mode>` — Delete a specific score entry\n");
+        text.push_str(
+            "`/list_scores <user_id>` — Show all scores for a given user across all dates and modes\n",
+        );
+        text.push_str("`/list_all_scores` — Dump the full contents of the scores table\n");
+        text.push_str("`/list_users` — List all users known to the bot\n");
+        text.push_str(
+            "`/raw_score <user_id> <date> <mode>` — Show the raw stored message for a score entry\n",
+        );
+        text.push_str("`/clear_day <date>` — Wipe all scores for a given date\n");
+        text.push_str("`/stats` — Show aggregate DB stats\n");
+    }
+
+    text
+}
+
+/// Format score rows into a code-block table, truncated to Discord's message limit.
+fn format_score_rows(rows: &[ScoreRow]) -> String {
+    let mut out = format!("**Scores ({} total)**\n```\n", rows.len());
+    out.push_str(&format!(
+        "{:<22} {:<16} {:<12} {:<18} {:>6}\n",
+        "User ID", "Username", "Date", "Mode", "Score"
+    ));
+    out.push_str(&"-".repeat(76));
+    out.push('\n');
+    for row in rows {
+        let username = truncate_username(&row.username, 16);
+        out.push_str(&format!(
+            "{:<22} {:<16} {:<12} {:<18} {:>6}\n",
+            row.user_id, username, row.date, row.mode, row.final_score,
+        ));
+    }
+    out.push_str("```");
+    truncate_message(out)
+}
+
+/// Discord messages have a 2000 character limit.
+/// If the message exceeds it, truncate and add a note.
+fn truncate_message(msg: String) -> String {
+    const MAX: usize = 2000;
+    if msg.len() <= MAX {
+        return msg;
+    }
+    // Find how many rows we can keep. Cut before the closing ``` and add a note.
+    let suffix = "\n... (truncated)\n```";
+    let budget = MAX - suffix.len();
+    // Find the last newline within budget.
+    let cut = msg[..budget].rfind('\n').unwrap_or(budget);
+    let mut truncated = msg[..cut].to_string();
+    truncated.push_str(suffix);
+    truncated
 }
