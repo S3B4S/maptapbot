@@ -254,10 +254,10 @@ fn test_parse_month_full() {
 
 #[test]
 fn test_daily_future_date_rejected() {
-    // Build a message with tomorrow's date to ensure it's always in the future.
-    let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
-    let month_name = tomorrow.format("%B").to_string(); // e.g. "April"
-    let day = tomorrow.day();
+    // Build a message with 2 days from now to ensure it's always beyond the allowed +1 day.
+    let future = (Utc::now() + chrono::Duration::days(2)).date_naive();
+    let month_name = future.format("%B").to_string(); // e.g. "April"
+    let day = future.day();
     // Compute a valid score for the formula: s1=10,s2=10,s3=10,s4=10,s5=10 → (10+10)*1 + 10*2 + (10+10)*3 = 20+20+60 = 100
     let msg = format!(
         "www.maptap.gg {} {}\n10🏆 10👑 10😁 10🫢 10🔥\nFinal score: 100",
@@ -274,9 +274,9 @@ fn test_daily_future_date_rejected() {
 
 #[test]
 fn test_challenge_future_date_rejected() {
-    let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
-    let month_abbr = tomorrow.format("%b").to_string(); // e.g. "Apr"
-    let day = tomorrow.day();
+    let future = (Utc::now() + chrono::Duration::days(2)).date_naive();
+    let month_abbr = future.format("%b").to_string(); // e.g. "Apr"
+    let day = future.day();
     // s1=89,s2=82,s3=94,s4=88,s5=97 → (89+82)*1 + 94*2 + (88+97)*3 = 171+188+555 = 914
     let msg = format!(
         "⚡ MapTap Challenge Round - {} {}\nwww.maptap.gg/challenge\n89🎉 82✨ 94🏆 88🎓 97🏅\nScore: 914 in 21.1s (4.0s to spare!)",
@@ -321,4 +321,40 @@ fn test_challenge_today_date_accepted() {
     let result = parse_challenge_message(1, G, &msg);
     assert!(result.is_some());
     assert!(result.unwrap().is_ok(), "today's date should be accepted");
+}
+
+#[test]
+fn test_daily_tomorrow_date_accepted() {
+    // Tomorrow (+1 day) must be accepted to accommodate users in timezones ahead of the server.
+    let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
+    let month_name = tomorrow.format("%B").to_string();
+    let day = tomorrow.day();
+    let msg = format!(
+        "www.maptap.gg {} {}\n10🏆 10👑 10😁 10🫢 10🔥\nFinal score: 100",
+        month_name, day
+    );
+    let result = parse_maptap_message(1, G, &msg);
+    assert!(result.is_some());
+    assert!(
+        result.unwrap().is_ok(),
+        "tomorrow's date should be accepted"
+    );
+}
+
+#[test]
+fn test_challenge_tomorrow_date_accepted() {
+    // Tomorrow (+1 day) must be accepted to accommodate users in timezones ahead of the server.
+    let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
+    let month_abbr = tomorrow.format("%b").to_string();
+    let day = tomorrow.day();
+    let msg = format!(
+        "⚡ MapTap Challenge Round - {} {}\nwww.maptap.gg/challenge\n89🎉 82✨ 94🏆 88🎓 97🏅\nScore: 914 in 21.1s (4.0s to spare!)",
+        month_abbr, day
+    );
+    let result = parse_challenge_message(1, G, &msg);
+    assert!(result.is_some());
+    assert!(
+        result.unwrap().is_ok(),
+        "tomorrow's date should be accepted"
+    );
 }

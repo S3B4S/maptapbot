@@ -71,8 +71,8 @@ These apply to all modes:
 
 ## Generic date parsing
 
-- The date in the message cannot be in the future; it must be today or an earlier date
-- If a future date is detected, treat it as a validation failure with reason: `"Date cannot be in the future"`
+- The date in the message cannot be more than 1 day in the future; it must be today, tomorrow, or an earlier date (tomorrow is allowed to accommodate users in timezones ahead of the server)
+- If a date more than 1 day in the future is detected, treat it as a validation failure with reason: `"Date cannot be in the future"`
 
 ## Failure behavior
 
