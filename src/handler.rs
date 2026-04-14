@@ -467,13 +467,13 @@ impl Handler {
                     let mode_str = score.mode.as_str();
                     let msg_id_str = discord_msg.id.get().to_string();
                     let channel_id_str = discord_msg.channel_id.get().to_string();
-                    let guild_id_str = guild_id.map(|g| g.to_string()).unwrap_or_default();
+                    let guild_id_str = guild_id.map(|g| g.to_string());
 
                     let db = self.db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
 
                     match db.backfill_score(
                         &score.user_id.to_string(),
-                        &guild_id_str,
+                        guild_id_str.as_deref(),
                         &date_str,
                         mode_str,
                         &msg_id_str,
@@ -490,7 +490,7 @@ impl Handler {
                             // Either already backfilled or no matching DB row.
                             match db.get_score_message_id(
                                 &score.user_id.to_string(),
-                                &guild_id_str,
+                                guild_id_str.as_deref(),
                                 &date_str,
                                 mode_str,
                             ) {

@@ -612,7 +612,7 @@ impl Database {
     pub fn backfill_score(
         &self,
         user_id: &str,
-        guild_id: &str,
+        guild_id: Option<&str>,
         date: &str,
         mode: &str,
         message_id: &str,
@@ -622,7 +622,7 @@ impl Database {
             "UPDATE scores
              SET message_id = ?5, channel_id = ?6
              WHERE user_id = ?1
-               AND guild_id = ?2
+               AND guild_id IS ?2
                AND date = ?3
                AND mode = ?4
                AND message_id LIKE 'legacy-%'",
@@ -635,13 +635,13 @@ impl Database {
     pub fn get_score_message_id(
         &self,
         user_id: &str,
-        guild_id: &str,
+        guild_id: Option<&str>,
         date: &str,
         mode: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT message_id FROM scores
-             WHERE user_id = ?1 AND guild_id = ?2 AND date = ?3 AND mode = ?4",
+             WHERE user_id = ?1 AND guild_id IS ?2 AND date = ?3 AND mode = ?4",
         )?;
         let mut rows = stmt.query(params![user_id, guild_id, date, mode])?;
         match rows.next()? {

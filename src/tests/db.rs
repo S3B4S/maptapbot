@@ -558,7 +558,7 @@ fn test_backfill_score() {
     let updated = db
         .backfill_score(
             "1",
-            "100",
+            Some("100"),
             "2026-04-13",
             "daily_default",
             "999888777",
@@ -595,7 +595,7 @@ fn test_backfill_skips_non_legacy() {
     let updated = db
         .backfill_score(
             "1",
-            "100",
+            Some("100"),
             "2026-04-13",
             "daily_default",
             "111222333",
@@ -651,14 +651,14 @@ fn test_get_score_message_id() {
     );
 
     let mid = db
-        .get_score_message_id("1", "100", "2026-04-13", "daily_default")
+        .get_score_message_id("1", Some("100"), "2026-04-13", "daily_default")
         .unwrap();
     assert!(mid.is_some());
     assert!(!mid.unwrap().starts_with("legacy-"));
 
     // Non-existent row returns None.
     let mid = db
-        .get_score_message_id("999", "100", "2026-04-13", "daily_default")
+        .get_score_message_id("999", Some("100"), "2026-04-13", "daily_default")
         .unwrap();
     assert!(mid.is_none());
 }
