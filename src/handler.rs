@@ -371,9 +371,51 @@ impl EventHandler for Handler {
         }
 
         // If a channel allowlist is configured, ignore messages from other channels.
+        // Thread messages have their own channel ID, so we also check whether the
+        // thread's parent channel is in the allowlist.
         if let Some(ref ids) = self.channel_ids {
             if !ids.contains(&msg.channel_id.get()) {
-                return;
+                let parent_allowed = 'parent: {
+                    // Try cache first (no API call).
+                    // Threads live in guild.threads (Vec), not guild.channels (HashMap).
+                    if let Some(guild_id) = msg.guild_id {
+                        if let Some(guild) = ctx.cache.guild(guild_id) {
+                            let cached = guild
+                                .channels
+                                .get(&msg.channel_id)
+                                .or_else(|| {
+                                    guild
+                                        .threads
+                                        .iter()
+                                        .find(|t| t.id == msg.channel_id)
+                                });
+                            if let Some(channel) = cached {
+                                break 'parent channel
+                                    .parent_id
+                                    .map_or(false, |pid| ids.contains(&pid.get()));
+                            }
+                        }
+                    }
+                    // Fallback: fetch from Discord API.
+                    match msg.channel_id.to_channel(&ctx.http).await {
+                        Ok(channel) => {
+                            if let Some(guild_channel) = channel.guild() {
+                                guild_channel
+                                    .parent_id
+                                    .map_or(false, |pid| ids.contains(&pid.get()))
+                            } else {
+                                false
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to resolve channel {}: {}", msg.channel_id, e);
+                            false
+                        }
+                    }
+                };
+                if !parent_allowed {
+                    return;
+                }
             }
         }
 
