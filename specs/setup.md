@@ -88,14 +88,19 @@ These apply to all modes:
 Through discord you can get an ID for an user. Use this ID to match the user to a score they posted.
 A user can only post 1 score for each day. If an user posts multiple (valid) scores for 1 day, assume that the latest post wins and overwrites the previous score.
 
-The guild the msg comes from should also be stored.
+The guild, channel, and message ID of the source Discord message are stored per score. This enables direct linking to the original message via:
+`https://discord.com/channels/{guild_id}/{channel_id}/{message_id}`
 
 2 tables, 1 for scores, and 1 for user info
 
-Messages:
+Scores:
+- `message_id` (Discord message snowflake)
+- `channel_id` (Discord channel snowflake)
 - `user_id`
 - `guild_id`
 - `date`
+- `mode` (e.g. `daily_default`, `daily_challenge`)
+- `time_spent_ms` (milliseconds, challenge mode only)
 - `score1`
 - `score2`
 - `score3`
@@ -105,7 +110,9 @@ Messages:
 - `raw_message` (parsed & sanitized)
 - `created_at`
 
-Key is `user_id` + `guild_id` + `date`
+Key is `message_id`
+
+UNIQUE constraint on (`user_id`, `guild_id`, `date`, `mode`) — enforces the "one score per user per guild per day per mode" rule. On conflict (upsert), the latest post wins and overwrites the existing row (including its `message_id` and `channel_id`).
 
 Users:
 - `user_id`

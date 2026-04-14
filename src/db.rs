@@ -21,6 +21,8 @@ pub struct LeaderboardRow {
 /// Row returned by admin score-listing queries.
 #[derive(Debug)]
 pub struct ScoreRow {
+    pub message_id: String,
+    pub channel_id: Option<String>,
     pub user_id: String,
     pub username: String,
     pub guild_id: Option<String>,
@@ -74,6 +76,8 @@ impl Database {
             );
 
             CREATE TABLE IF NOT EXISTS scores (
+                message_id    TEXT PRIMARY KEY,
+                channel_id    TEXT,
                 user_id       TEXT NOT NULL,
                 guild_id      TEXT,
                 date          TEXT NOT NULL,
@@ -87,7 +91,7 @@ impl Database {
                 final_score   INTEGER NOT NULL,
                 raw_message   TEXT,
                 created_at    TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, guild_id, date, mode),
+                UNIQUE (user_id, guild_id, date, mode),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );",
         )?;
@@ -99,6 +103,7 @@ impl Database {
     ///
     /// Migration 1: add mode/time_spent_ms columns (keyed on absence of `mode` column).
     /// Migration 2: make score1-5 nullable (keyed on `notnull` flag of score1 column).
+    /// Migration 3: add message_id (PK) + channel_id columns (keyed on absence of `message_id` column).
     fn migrate(&self) -> Result<(), rusqlite::Error> {
         // Migration 1: add mode column + restructure PK
         let has_mode: bool = {
@@ -146,7 +151,7 @@ impl Database {
 
                 COMMIT;",
             )?;
-            return Ok(());
+            // Don't return early — fall through to check subsequent migrations.
         }
 
         // Migration 2: make score1-5 nullable (if score1 still has notnull constraint)
@@ -189,6 +194,60 @@ impl Database {
             )?;
         }
 
+        // Migration 3: add message_id (PK) + channel_id columns.
+        // Existing rows get a synthetic "legacy-<hex>" message_id since PK cannot be NULL.
+        let has_message_id: bool = {
+            let mut stmt = self.conn.prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('scores') WHERE name = 'message_id'",
+            )?;
+            let count: i64 = stmt.query_row([], |row| row.get(0))?;
+            count > 0
+        };
+
+        if !has_message_id {
+            self.conn.execute_batch(
+                "BEGIN;
+
+                CREATE TABLE scores_new (
+                    message_id    TEXT PRIMARY KEY,
+                    channel_id    TEXT,
+                    user_id       TEXT NOT NULL,
+                    guild_id      TEXT,
+                    date          TEXT NOT NULL,
+                    mode          TEXT NOT NULL DEFAULT 'daily_default',
+                    time_spent_ms INTEGER,
+                    score1        INTEGER,
+                    score2        INTEGER,
+                    score3        INTEGER,
+                    score4        INTEGER,
+                    score5        INTEGER,
+                    final_score   INTEGER NOT NULL,
+                    raw_message   TEXT,
+                    created_at    TEXT DEFAULT (datetime('now')),
+                    UNIQUE (user_id, guild_id, date, mode),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
+                INSERT INTO scores_new
+                    (message_id, channel_id,
+                     user_id, guild_id, date, mode, time_spent_ms,
+                     score1, score2, score3, score4, score5,
+                     final_score, raw_message, created_at)
+                SELECT
+                    'legacy-' || hex(user_id || '|' || COALESCE(guild_id, '') || '|' || date || '|' || mode),
+                    NULL,
+                    user_id, guild_id, date, mode, time_spent_ms,
+                    score1, score2, score3, score4, score5,
+                    final_score, raw_message, created_at
+                FROM scores;
+
+                DROP TABLE scores;
+                ALTER TABLE scores_new RENAME TO scores;
+
+                COMMIT;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -207,10 +266,13 @@ impl Database {
         let guild_id_str = score.guild_id.map(|g| g.to_string());
         self.conn.execute(
             "INSERT INTO scores
-                 (user_id, guild_id, date, mode, time_spent_ms,
+                 (message_id, channel_id,
+                  user_id, guild_id, date, mode, time_spent_ms,
                   score1, score2, score3, score4, score5, final_score, raw_message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(user_id, guild_id, date, mode) DO UPDATE SET
+                message_id    = excluded.message_id,
+                channel_id    = excluded.channel_id,
                 score1        = excluded.score1,
                 score2        = excluded.score2,
                 score3        = excluded.score3,
@@ -221,6 +283,8 @@ impl Database {
                 raw_message   = excluded.raw_message,
                 created_at    = datetime('now')",
             params![
+                score.message_id.to_string(),
+                score.channel_id.to_string(),
                 score.user_id.to_string(),
                 guild_id_str,
                 score.date.format("%Y-%m-%d").to_string(),
@@ -395,7 +459,8 @@ impl Database {
     /// List all scores for a given user across all dates and modes.
     pub fn list_scores(&self, user_id: &str) -> Result<Vec<ScoreRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id, COALESCE(u.username, s.user_id) as username,
+            "SELECT s.message_id, s.channel_id,
+                    s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
                     s.final_score, s.time_spent_ms
@@ -406,18 +471,20 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![user_id], |row| {
             Ok(ScoreRow {
-                user_id: row.get(0)?,
-                username: row.get(1)?,
-                guild_id: row.get(2)?,
-                date: row.get(3)?,
-                mode: row.get(4)?,
-                score1: row.get(5)?,
-                score2: row.get(6)?,
-                score3: row.get(7)?,
-                score4: row.get(8)?,
-                score5: row.get(9)?,
-                final_score: row.get(10)?,
-                time_spent_ms: row.get(11)?,
+                message_id: row.get(0)?,
+                channel_id: row.get(1)?,
+                user_id: row.get(2)?,
+                username: row.get(3)?,
+                guild_id: row.get(4)?,
+                date: row.get(5)?,
+                mode: row.get(6)?,
+                score1: row.get(7)?,
+                score2: row.get(8)?,
+                score3: row.get(9)?,
+                score4: row.get(10)?,
+                score5: row.get(11)?,
+                final_score: row.get(12)?,
+                time_spent_ms: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -426,7 +493,8 @@ impl Database {
     /// Dump all scores in the table.
     pub fn list_all_scores(&self) -> Result<Vec<ScoreRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id, COALESCE(u.username, s.user_id) as username,
+            "SELECT s.message_id, s.channel_id,
+                    s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
                     s.final_score, s.time_spent_ms
@@ -436,18 +504,20 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ScoreRow {
-                user_id: row.get(0)?,
-                username: row.get(1)?,
-                guild_id: row.get(2)?,
-                date: row.get(3)?,
-                mode: row.get(4)?,
-                score1: row.get(5)?,
-                score2: row.get(6)?,
-                score3: row.get(7)?,
-                score4: row.get(8)?,
-                score5: row.get(9)?,
-                final_score: row.get(10)?,
-                time_spent_ms: row.get(11)?,
+                message_id: row.get(0)?,
+                channel_id: row.get(1)?,
+                user_id: row.get(2)?,
+                username: row.get(3)?,
+                guild_id: row.get(4)?,
+                date: row.get(5)?,
+                mode: row.get(6)?,
+                score1: row.get(7)?,
+                score2: row.get(8)?,
+                score3: row.get(9)?,
+                score4: row.get(10)?,
+                score5: row.get(11)?,
+                final_score: row.get(12)?,
+                time_spent_ms: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -526,6 +596,75 @@ impl Database {
             daily_default_count,
             daily_challenge_count,
         })
+    }
+
+    // ── Backfill methods ─────────────────────────────────────────────
+
+    /// Get the earliest date in the scores table (for backfill stop condition).
+    pub fn min_score_date(&self) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row("SELECT MIN(date) FROM scores", [], |row| row.get(0))
+    }
+
+    /// Attempt to backfill a legacy row with real Discord message metadata.
+    /// Only updates if the row still has a synthetic `legacy-` message_id.
+    /// Returns the number of rows updated (0 or 1).
+    pub fn backfill_score(
+        &self,
+        user_id: &str,
+        guild_id: &str,
+        date: &str,
+        mode: &str,
+        message_id: &str,
+        channel_id: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let updated = self.conn.execute(
+            "UPDATE scores
+             SET message_id = ?5, channel_id = ?6
+             WHERE user_id = ?1
+               AND guild_id = ?2
+               AND date = ?3
+               AND mode = ?4
+               AND message_id LIKE 'legacy-%'",
+            params![user_id, guild_id, date, mode, message_id, channel_id],
+        )?;
+        Ok(updated)
+    }
+
+    /// Check whether a score exists for the given composite key and return its message_id.
+    pub fn get_score_message_id(
+        &self,
+        user_id: &str,
+        guild_id: &str,
+        date: &str,
+        mode: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT message_id FROM scores
+             WHERE user_id = ?1 AND guild_id = ?2 AND date = ?3 AND mode = ?4",
+        )?;
+        let mut rows = stmt.query(params![user_id, guild_id, date, mode])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Count how many rows still have synthetic legacy message IDs.
+    pub fn count_legacy_scores(&self) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM scores WHERE message_id LIKE 'legacy-%'",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// Create a backup of the database using SQLite's backup API.
+    /// This is safe to call while the database is open and handles in-progress transactions.
+    pub fn backup(&self, dest_path: &str) -> Result<(), rusqlite::Error> {
+        let mut dest = Connection::open(dest_path)?;
+        let backup = rusqlite::backup::Backup::new(&self.conn, &mut dest)?;
+        backup.run_to_completion(5, std::time::Duration::from_millis(250), None)
     }
 }
 

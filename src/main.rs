@@ -53,12 +53,24 @@ async fn main() {
         info!("Admin IDs: {:?}", admin_ids);
     }
 
+    // Parse optional admin guild ID for guild-specific admin commands.
+    let admin_guild_id: Option<u64> = std::env::var("ADMIN_GUILD")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
+    if let Some(gid) = admin_guild_id {
+        info!("Admin guild: {}", gid);
+    } else {
+        info!("No ADMIN_GUILD set — admin-only commands will not be registered");
+    }
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler::new(db, channel_ids, admin_ids))
+        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, db_path))
         .await
         .expect("Failed to create Discord client");
 

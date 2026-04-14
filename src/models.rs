@@ -25,6 +25,8 @@ impl GameMode {
 
 #[derive(Debug, Clone)]
 pub struct MaptapScore {
+    pub message_id: u64,
+    pub channel_id: u64,
     pub user_id: u64,
     pub guild_id: Option<u64>,
     pub mode: GameMode,

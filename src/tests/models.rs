@@ -4,6 +4,8 @@ use super::*;
 
 fn make_score(scores: [Option<u32>; 5], final_score: u32) -> MaptapScore {
     MaptapScore {
+        message_id: 1,
+        channel_id: 1,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyDefault,
@@ -69,6 +71,8 @@ fn test_game_mode_round_trip() {
 fn test_none_score_valid_in_challenge_mode() {
     // 96 + 4 + 68 + 91 + 0(None) -> (96+4)*1 + 68*2 + (91+0)*3 = 100 + 136 + 273 = 509
     let s = MaptapScore {
+        message_id: 1,
+        channel_id: 1,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyChallenge,
@@ -85,6 +89,8 @@ fn test_none_score_valid_in_challenge_mode() {
 #[test]
 fn test_none_score_invalid_in_daily_default() {
     let s = MaptapScore {
+        message_id: 1,
+        channel_id: 1,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyDefault,

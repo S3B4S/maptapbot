@@ -4,12 +4,12 @@ use serenity::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
     CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, CreateMessage, CreateThread,
+    CreateInteractionResponseMessage, CreateMessage, CreateThread, GetMessages,
 };
 use serenity::model::application::{ButtonStyle, CommandOptionType, Interaction};
 use serenity::model::channel::{ChannelType, Message};
 use serenity::model::gateway::Ready;
-use serenity::model::id::{ChannelId, MessageId};
+use serenity::model::id::{ChannelId, GuildId, MessageId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
@@ -32,16 +32,29 @@ pub struct Handler {
     channel_ids: Option<Vec<u64>>,
     /// Discord user IDs that have admin privileges.
     admin_ids: Vec<u64>,
+    /// Optional guild ID where admin-only commands (e.g. /backfill) are registered.
+    /// When set, these commands are guild-specific and invisible to other servers.
+    admin_guild_id: Option<u64>,
+    /// Path to the SQLite database file, used for deriving backup paths.
+    db_path: String,
 }
 
 impl Handler {
-    pub fn new(db: Database, channel_ids: Option<Vec<u64>>, admin_ids: Vec<u64>) -> Self {
+    pub fn new(
+        db: Database,
+        channel_ids: Option<Vec<u64>>,
+        admin_ids: Vec<u64>,
+        admin_guild_id: Option<u64>,
+        db_path: String,
+    ) -> Self {
         Self {
             db: std::sync::Mutex::new(db),
             leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
             full_leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
             channel_ids,
             admin_ids,
+            admin_guild_id,
+            db_path,
         }
     }
 
@@ -360,6 +373,171 @@ impl Handler {
 
         Ok(build_full_embed(title, &rows, is_permanent, is_challenge))
     }
+
+    /// Run the backfill process: scan Discord channel history and fill in
+    /// message_id/channel_id for legacy rows.
+    async fn run_backfill(&self, ctx: &Context) -> Result<String, String> {
+        use chrono::NaiveDate;
+        use tracing::debug;
+
+        let channel_ids = match &self.channel_ids {
+            Some(ids) => ids.clone(),
+            None => return Err("No DISCORD_CHANNEL_IDS configured — cannot backfill without a channel list.".to_string()),
+        };
+
+        let min_date_str = {
+            let db = self.db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
+            db.min_score_date().map_err(|e| format!("DB error: {}", e))?
+        };
+
+        let min_date = match &min_date_str {
+            Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map_err(|e| format!("Failed to parse min_date '{}': {}", s, e))?,
+            None => return Ok("No scores in database — nothing to backfill.".to_string()),
+        };
+
+        // Allow 1 day of slack for timezone differences.
+        let stop_date = min_date - chrono::Duration::days(1);
+
+        let mut updated: u64 = 0;
+        let mut already_filled: u64 = 0;
+        let mut unmatched: u64 = 0;
+        let mut channels_scanned: u64 = 0;
+        let mut api_calls: u64 = 0;
+
+        for &ch_id_raw in &channel_ids {
+            channels_scanned += 1;
+            let ch_id = ChannelId::new(ch_id_raw);
+            let mut before_id: Option<MessageId> = None;
+            let mut stop_channel = false;
+
+            loop {
+                let mut request = GetMessages::new().limit(100);
+                if let Some(bid) = before_id {
+                    request = request.before(bid);
+                }
+
+                let messages = match ch_id.messages(&ctx.http, request).await {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        error!("Backfill: failed to fetch messages from channel={}: {}", ch_id_raw, e);
+                        break;
+                    }
+                };
+                api_calls += 1;
+
+                if messages.is_empty() {
+                    break;
+                }
+
+                for discord_msg in &messages {
+                    before_id = Some(discord_msg.id);
+
+                    // Check stop condition based on message timestamp.
+                    let ts = *discord_msg.timestamp;
+                    let msg_date = NaiveDate::from_ymd_opt(
+                        ts.year(),
+                        ts.month() as u32,
+                        ts.day() as u32,
+                    ).unwrap_or(stop_date);
+                    if msg_date < stop_date {
+                        stop_channel = true;
+                        break;
+                    }
+
+                    // Skip bot messages.
+                    if discord_msg.author.bot {
+                        continue;
+                    }
+
+                    let user_id = discord_msg.author.id.get();
+                    let guild_id = discord_msg.guild_id.map(|g| g.get());
+                    let content = &discord_msg.content;
+
+                    // Try to parse the message.
+                    let parsed = parse_maptap_message(user_id, guild_id, content)
+                        .or_else(|| parse_challenge_message(user_id, guild_id, content));
+
+                    let score = match parsed {
+                        Some(Ok(s)) => s,
+                        Some(Err(_)) | None => continue,
+                    };
+
+                    let date_str = score.date.format("%Y-%m-%d").to_string();
+                    let mode_str = score.mode.as_str();
+                    let msg_id_str = discord_msg.id.get().to_string();
+                    let channel_id_str = discord_msg.channel_id.get().to_string();
+                    let guild_id_str = guild_id.map(|g| g.to_string()).unwrap_or_default();
+
+                    let db = self.db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
+
+                    match db.backfill_score(
+                        &score.user_id.to_string(),
+                        &guild_id_str,
+                        &date_str,
+                        mode_str,
+                        &msg_id_str,
+                        &channel_id_str,
+                    ) {
+                        Ok(1) => {
+                            updated += 1;
+                            info!(
+                                "Backfill: updated score — user={}, date={}, mode={} -> message_id={}, channel_id={}",
+                                user_id, date_str, mode_str, msg_id_str, channel_id_str
+                            );
+                        }
+                        Ok(0) => {
+                            // Either already backfilled or no matching DB row.
+                            match db.get_score_message_id(
+                                &score.user_id.to_string(),
+                                &guild_id_str,
+                                &date_str,
+                                mode_str,
+                            ) {
+                                Ok(Some(existing_mid)) if !existing_mid.starts_with("legacy-") => {
+                                    already_filled += 1;
+                                    debug!(
+                                        "Backfill: skip (already filled) — user={}, date={}, mode={}, message_id={}",
+                                        user_id, date_str, mode_str, existing_mid
+                                    );
+                                }
+                                _ => {
+                                    unmatched += 1;
+                                    warn!(
+                                        "Backfill: no matching DB row — message_id={}, user={}, date={}, mode={}",
+                                        msg_id_str, user_id, date_str, mode_str
+                                    );
+                                }
+                            }
+                        }
+                        Ok(n) => {
+                            warn!("Backfill: unexpected update count {} for user={}, date={}", n, user_id, date_str);
+                        }
+                        Err(e) => {
+                            error!("Backfill: DB error updating user={}, date={}: {}", user_id, date_str, e);
+                        }
+                    }
+                }
+
+                if stop_channel {
+                    break;
+                }
+            }
+        }
+
+        let remaining = {
+            let db = self.db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
+            db.count_legacy_scores().map_err(|e| format!("DB error: {}", e))?
+        };
+
+        let summary = format!(
+            "Backfill complete: {} updated, {} already filled, {} unmatched, {} channels scanned, {} API calls. {} rows still have synthetic IDs.",
+            updated, already_filled, unmatched, channels_scanned, api_calls, remaining
+        );
+        info!("{}", summary);
+
+        Ok(summary)
+    }
 }
 
 #[async_trait]
@@ -433,7 +611,11 @@ impl EventHandler for Handler {
         };
 
         match result {
-            Ok(score) => {
+            Ok(mut score) => {
+                // Attach Discord message metadata (parsers don't have access to these).
+                score.message_id = msg.id.get();
+                score.channel_id = msg.channel_id.get();
+
                 let date_str = score.date.format("%Y-%m-%d").to_string();
                 let final_score = score.final_score;
                 let mode_label = match score.mode {
@@ -545,6 +727,22 @@ impl EventHandler for Handler {
             error!("Failed to register slash commands: {}", e);
         } else {
             info!("Slash commands registered");
+        }
+
+        // Register admin-only commands as guild-specific on ADMIN_GUILD.
+        if let Some(gid) = self.admin_guild_id {
+            let guild_id = GuildId::new(gid);
+            let admin_commands = vec![
+                CreateCommand::new("backfill")
+                    .description("Backfill message_id/channel_id from Discord channel history"),
+                CreateCommand::new("backup")
+                    .description("Create a timestamped backup of the database"),
+            ];
+            if let Err(e) = guild_id.set_commands(&ctx.http, admin_commands).await {
+                error!("Failed to register admin guild commands on {}: {}", gid, e);
+            } else {
+                info!("Admin guild commands registered on {}", gid);
+            }
         }
     }
 
@@ -682,6 +880,69 @@ impl EventHandler for Handler {
                     );
                     if let Err(e) = cmd.create_response(&ctx.http, response).await {
                         error!("Failed to respond to /{}: {}", name, e);
+                    }
+                }
+                "backfill" => {
+                    if !self.is_admin(invoker_id) {
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("You do not have permission to use this command.")
+                                .ephemeral(true),
+                        );
+                        let _ = cmd.create_response(&ctx.http, response).await;
+                        return;
+                    }
+
+                    // Acknowledge immediately — backfill may take a while.
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Starting backfill... This may take a while.")
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /backfill: {}", e);
+                        return;
+                    }
+
+                    let result = self.run_backfill(&ctx).await;
+                    let followup_content = match result {
+                        Ok(summary) => summary,
+                        Err(e) => format!("Backfill failed: {}", e),
+                    };
+
+                    let followup = CreateInteractionResponseFollowup::new()
+                        .content(followup_content)
+                        .ephemeral(true);
+                    if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                        error!("Failed to send backfill follow-up: {}", e);
+                    }
+                }
+                "backup" => {
+                    if !self.is_admin(invoker_id) {
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("You do not have permission to use this command.")
+                                .ephemeral(true),
+                        );
+                        let _ = cmd.create_response(&ctx.http, response).await;
+                        return;
+                    }
+
+                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                    let backup_path = format!("{}.backup_{}", self.db_path, timestamp);
+
+                    let content = match self.db.lock().unwrap().backup(&backup_path) {
+                        Ok(()) => format!("Backup created: `{}`", backup_path),
+                        Err(e) => format!("Backup failed: {}", e),
+                    };
+
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(content)
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /backup: {}", e);
                     }
                 }
                 _ => {}
@@ -1162,6 +1423,8 @@ fn build_help_text(is_admin: bool) -> String {
         );
         text.push_str("`/clear_day <date>` — Wipe all scores for a given date\n");
         text.push_str("`/stats` — Show aggregate DB stats\n");
+        text.push_str("`/backfill` — Backfill message_id/channel_id from Discord channel history\n");
+        text.push_str("`/backup` — Create a timestamped backup of the database\n");
     }
 
     text

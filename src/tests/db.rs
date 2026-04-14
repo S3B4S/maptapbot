@@ -1,5 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 use chrono::NaiveDate;
+
+/// Auto-incrementing counter to generate unique message IDs for tests.
+static NEXT_MSG_ID: AtomicU64 = AtomicU64::new(1);
 
 fn test_db() -> Database {
     Database::open(":memory:").unwrap()
@@ -15,6 +20,8 @@ fn make_score(
     time_spent_ms: Option<u32>,
 ) -> MaptapScore {
     MaptapScore {
+        message_id: NEXT_MSG_ID.fetch_add(1, Ordering::Relaxed),
+        channel_id: 500,
         user_id,
         guild_id: Some(guild_id),
         mode,
@@ -445,4 +452,231 @@ fn test_challenge_null_score_averaged_as_zero() {
     assert_eq!(results.len(), 1);
     // avg score5: (80 + 0) / 2 = 40.0
     assert_eq!(results[0].score5, Some(40.0));
+}
+
+// ── Message ID / backfill tests ──────────────────────────────
+
+#[test]
+fn test_message_id_stored_as_pk() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    // Verify message_id and channel_id are stored.
+    let row: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT message_id, channel_id FROM scores WHERE user_id = '1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // message_id should be a stringified u64, not a legacy- prefix
+    assert!(!row.0.starts_with("legacy-"));
+    assert_eq!(row.1, "500"); // channel_id from make_score
+}
+
+#[test]
+fn test_upsert_overwrites_message_id() {
+    let db = test_db();
+    // First insert.
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(50), Some(50), Some(50), Some(50), Some(50)],
+        600,
+    );
+
+    let first_msg_id: String = db
+        .conn
+        .query_row(
+            "SELECT message_id FROM scores WHERE user_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // Second insert (same user/guild/date/mode) — should overwrite.
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    let second_msg_id: String = db
+        .conn
+        .query_row(
+            "SELECT message_id FROM scores WHERE user_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // message_id should have been updated (different auto-incremented value).
+    assert_ne!(first_msg_id, second_msg_id);
+
+    // Only one row should exist.
+    let count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM scores", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn test_backfill_score() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    // Manually set the message_id to a legacy value to simulate migration.
+    db.conn
+        .execute(
+            "UPDATE scores SET message_id = 'legacy-AABB' WHERE user_id = '1'",
+            [],
+        )
+        .unwrap();
+
+    // Backfill should update the legacy row.
+    let updated = db
+        .backfill_score(
+            "1",
+            "100",
+            "2026-04-13",
+            "daily_default",
+            "999888777",
+            "555666",
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let (msg_id, ch_id): (String, String) = db
+        .conn
+        .query_row(
+            "SELECT message_id, channel_id FROM scores WHERE user_id = '1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(msg_id, "999888777");
+    assert_eq!(ch_id, "555666");
+}
+
+#[test]
+fn test_backfill_skips_non_legacy() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    // Row already has a real message_id — backfill should not overwrite.
+    let updated = db
+        .backfill_score(
+            "1",
+            "100",
+            "2026-04-13",
+            "daily_default",
+            "111222333",
+            "444555",
+        )
+        .unwrap();
+    assert_eq!(updated, 0);
+}
+
+#[test]
+fn test_count_legacy_scores() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+    insert_score(
+        &db,
+        2,
+        100,
+        13,
+        [Some(50), Some(50), Some(50), Some(50), Some(50)],
+        600,
+    );
+
+    // No legacy rows — both have real message IDs.
+    assert_eq!(db.count_legacy_scores().unwrap(), 0);
+
+    // Make one legacy.
+    db.conn
+        .execute(
+            "UPDATE scores SET message_id = 'legacy-AABB' WHERE user_id = '1'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(db.count_legacy_scores().unwrap(), 1);
+}
+
+#[test]
+fn test_get_score_message_id() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    let mid = db
+        .get_score_message_id("1", "100", "2026-04-13", "daily_default")
+        .unwrap();
+    assert!(mid.is_some());
+    assert!(!mid.unwrap().starts_with("legacy-"));
+
+    // Non-existent row returns None.
+    let mid = db
+        .get_score_message_id("999", "100", "2026-04-13", "daily_default")
+        .unwrap();
+    assert!(mid.is_none());
+}
+
+#[test]
+fn test_list_scores_includes_message_id() {
+    let db = test_db();
+    insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+
+    let rows = db.list_scores("1").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].message_id.starts_with("legacy-"));
+    assert_eq!(rows[0].channel_id, Some("500".to_string()));
 }
