@@ -411,6 +411,19 @@ impl Handler {
             let mut before_id: Option<MessageId> = None;
             let mut stop_channel = false;
 
+            // Resolve the channel's guild_id once up front. The REST API
+            // (GET /channels/{id}/messages) does NOT include guild_id on
+            // message objects, so we cannot rely on discord_msg.guild_id.
+            let channel_guild_id: Option<u64> = match ch_id.to_channel(&ctx.http).await {
+                Ok(serenity::model::channel::Channel::Guild(gc)) => Some(gc.guild_id.get()),
+                Ok(_) => None, // DM or group channel
+                Err(e) => {
+                    error!("Backfill: failed to resolve channel {}: {}", ch_id_raw, e);
+                    continue;
+                }
+            };
+            api_calls += 1;
+
             loop {
                 let mut request = GetMessages::new().limit(100);
                 if let Some(bid) = before_id {
@@ -451,7 +464,7 @@ impl Handler {
                     }
 
                     let user_id = discord_msg.author.id.get();
-                    let guild_id = discord_msg.guild_id.map(|g| g.get());
+                    let guild_id = channel_guild_id;
                     let content = &discord_msg.content;
 
                     // Try to parse the message.
