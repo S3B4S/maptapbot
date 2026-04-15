@@ -79,6 +79,10 @@ impl Handler {
         options: &[serenity::model::application::ResolvedOption<'_>],
         invoker_id: u64,
     ) -> String {
+        println!("Admin command incoming!");
+        println!("{}", name);
+        println!("{}", invoker_id);
+        println!("---");
         let get_str = |key: &str| -> Option<&str> {
             options.iter().find_map(|o| {
                 if o.name == key {
@@ -90,11 +94,15 @@ impl Handler {
             })
         };
 
+        print!("1");
+
         let db = match self.db.lock() {
             Ok(db) => db,
             Err(e) => return format!("Internal error: failed to lock DB: {}", e),
         };
 
+        print!("2");
+        
         match name {
             "delete_score" => {
                 let Some(message_id) = get_str("message_id") else {
@@ -638,6 +646,9 @@ impl EventHandler for Handler {
                             "action",
                             "read | add | delete",
                         )
+                        .add_string_choice("action", "read")
+                        .add_string_choice("action", "add")
+                        .add_string_choice("action", "delete")
                         .required(true),
                     )
                     .add_option(user_id_option(false)),
