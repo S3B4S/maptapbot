@@ -549,7 +549,7 @@ impl EventHandler for Handler {
                     .and_then(|db| db.is_on_hit_list(user_id).ok())
                     .unwrap_or(false);
 
-                if on_hit_list && final_score > 900 {
+                if on_hit_list && final_score > 800 {
                     let taunts = [
                         format!(
                             "Okay {} … {} points? OBVIOUSLY cheating. \
