@@ -224,9 +224,24 @@ fn parse_challenge_score_line(line: &str) -> Result<(u32, u32), String> {
         return Err("Expected 's' after time value".to_string());
     }
 
+    // Max time is 25s — the integer part (before any decimal) must be at most 2 digits
+    let integer_part = time_str.split('.').next().unwrap_or(&time_str);
+    if integer_part.len() > 2 {
+        return Err(format!(
+            "Time '{}s' exceeds maximum allowed time of 25s",
+            time_str
+        ));
+    }
+
     let time_secs: f64 = time_str
         .parse()
         .map_err(|e| format!("Failed to parse time '{}': {}", time_str, e))?;
+    if time_secs > 25.0 {
+        return Err(format!(
+            "Time '{}s' exceeds maximum allowed time of 25s",
+            time_str
+        ));
+    }
     let time_ms = (time_secs * 1000.0).round() as u32;
 
     Ok((final_score, time_ms))

@@ -200,6 +200,24 @@ fn test_default_not_matched_by_challenge_parser() {
 }
 
 #[test]
+fn test_challenge_time_exceeds_max() {
+    // Time > 25s should be rejected
+    let msg = "⚡ MapTap Challenge Round - Apr 12\nwww.maptap.gg/challenge\n89🎉 82✨ 94🏆 88🎓 97🏅\nScore: 914 in 100.0s";
+    let result = parse_challenge_message(1, G, msg);
+    assert!(result.is_some(), "expected Some (recognized as challenge block)");
+    assert!(result.unwrap().is_err(), "expected Err for time > 25s");
+}
+
+#[test]
+fn test_challenge_time_exactly_25s_accepted() {
+    // 25.0s is valid (TIME UP boundary)
+    let msg = "⚡ MapTap Challenge Round - Apr 13\nwww.maptap.gg/challenge\n96🏅 4🤮 68🙂 91🎉 --\nScore: 509 in 25.0s (TIME UP!)";
+    let result = parse_challenge_message(1, G, msg);
+    assert!(result.is_some());
+    assert!(result.unwrap().is_ok(), "25.0s should be accepted");
+}
+
+#[test]
 fn test_parse_challenge_timed_out() {
     // Spec example: 96🏅 4🤮 68🙂 91🎉 -- → last score is None
     // (96+4)*1 + 68*2 + (91+0)*3 = 100 + 136 + 273 = 509
