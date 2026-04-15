@@ -598,67 +598,6 @@ impl Database {
         })
     }
 
-    // ── Backfill methods ─────────────────────────────────────────────
-
-    /// Get the earliest date in the scores table (for backfill stop condition).
-    pub fn min_score_date(&self) -> Result<Option<String>, rusqlite::Error> {
-        self.conn
-            .query_row("SELECT MIN(date) FROM scores", [], |row| row.get(0))
-    }
-
-    /// Attempt to backfill a legacy row with real Discord message metadata.
-    /// Only updates if the row still has a synthetic `legacy-` message_id.
-    /// Returns the number of rows updated (0 or 1).
-    pub fn backfill_score(
-        &self,
-        user_id: &str,
-        guild_id: Option<&str>,
-        date: &str,
-        mode: &str,
-        message_id: &str,
-        channel_id: &str,
-    ) -> Result<usize, rusqlite::Error> {
-        let updated = self.conn.execute(
-            "UPDATE scores
-             SET message_id = ?5, channel_id = ?6
-             WHERE user_id = ?1
-               AND guild_id IS ?2
-               AND date = ?3
-               AND mode = ?4
-               AND message_id LIKE 'legacy-%'",
-            params![user_id, guild_id, date, mode, message_id, channel_id],
-        )?;
-        Ok(updated)
-    }
-
-    /// Check whether a score exists for the given composite key and return its message_id.
-    pub fn get_score_message_id(
-        &self,
-        user_id: &str,
-        guild_id: Option<&str>,
-        date: &str,
-        mode: &str,
-    ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT message_id FROM scores
-             WHERE user_id = ?1 AND guild_id IS ?2 AND date = ?3 AND mode = ?4",
-        )?;
-        let mut rows = stmt.query(params![user_id, guild_id, date, mode])?;
-        match rows.next()? {
-            Some(row) => Ok(row.get(0)?),
-            None => Ok(None),
-        }
-    }
-
-    /// Count how many rows still have synthetic legacy message IDs.
-    pub fn count_legacy_scores(&self) -> Result<i64, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM scores WHERE message_id LIKE 'legacy-%'",
-            [],
-            |row| row.get(0),
-        )
-    }
-
     /// Create a backup of the database using SQLite's backup API.
     /// This is safe to call while the database is open and handles in-progress transactions.
     pub fn backup(&self, dest_path: &str) -> Result<(), rusqlite::Error> {

@@ -454,7 +454,7 @@ fn test_challenge_null_score_averaged_as_zero() {
     assert_eq!(results[0].score5, Some(40.0));
 }
 
-// ── Message ID / backfill tests ──────────────────────────────
+// ── Message ID tests ──────────────────────────────
 
 #[test]
 fn test_message_id_stored_as_pk() {
@@ -532,135 +532,6 @@ fn test_upsert_overwrites_message_id() {
         .query_row("SELECT COUNT(*) FROM scores", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 1);
-}
-
-#[test]
-fn test_backfill_score() {
-    let db = test_db();
-    insert_score(
-        &db,
-        1,
-        100,
-        13,
-        [Some(93), Some(90), Some(83), Some(61), Some(97)],
-        823,
-    );
-
-    // Manually set the message_id to a legacy value to simulate migration.
-    db.conn
-        .execute(
-            "UPDATE scores SET message_id = 'legacy-AABB' WHERE user_id = '1'",
-            [],
-        )
-        .unwrap();
-
-    // Backfill should update the legacy row.
-    let updated = db
-        .backfill_score(
-            "1",
-            Some("100"),
-            "2026-04-13",
-            "daily_default",
-            "999888777",
-            "555666",
-        )
-        .unwrap();
-    assert_eq!(updated, 1);
-
-    let (msg_id, ch_id): (String, String) = db
-        .conn
-        .query_row(
-            "SELECT message_id, channel_id FROM scores WHERE user_id = '1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(msg_id, "999888777");
-    assert_eq!(ch_id, "555666");
-}
-
-#[test]
-fn test_backfill_skips_non_legacy() {
-    let db = test_db();
-    insert_score(
-        &db,
-        1,
-        100,
-        13,
-        [Some(93), Some(90), Some(83), Some(61), Some(97)],
-        823,
-    );
-
-    // Row already has a real message_id — backfill should not overwrite.
-    let updated = db
-        .backfill_score(
-            "1",
-            Some("100"),
-            "2026-04-13",
-            "daily_default",
-            "111222333",
-            "444555",
-        )
-        .unwrap();
-    assert_eq!(updated, 0);
-}
-
-#[test]
-fn test_count_legacy_scores() {
-    let db = test_db();
-    insert_score(
-        &db,
-        1,
-        100,
-        13,
-        [Some(93), Some(90), Some(83), Some(61), Some(97)],
-        823,
-    );
-    insert_score(
-        &db,
-        2,
-        100,
-        13,
-        [Some(50), Some(50), Some(50), Some(50), Some(50)],
-        600,
-    );
-
-    // No legacy rows — both have real message IDs.
-    assert_eq!(db.count_legacy_scores().unwrap(), 0);
-
-    // Make one legacy.
-    db.conn
-        .execute(
-            "UPDATE scores SET message_id = 'legacy-AABB' WHERE user_id = '1'",
-            [],
-        )
-        .unwrap();
-    assert_eq!(db.count_legacy_scores().unwrap(), 1);
-}
-
-#[test]
-fn test_get_score_message_id() {
-    let db = test_db();
-    insert_score(
-        &db,
-        1,
-        100,
-        13,
-        [Some(93), Some(90), Some(83), Some(61), Some(97)],
-        823,
-    );
-
-    let mid = db
-        .get_score_message_id("1", Some("100"), "2026-04-13", "daily_default")
-        .unwrap();
-    assert!(mid.is_some());
-    assert!(!mid.unwrap().starts_with("legacy-"));
-
-    // Non-existent row returns None.
-    let mid = db
-        .get_score_message_id("999", Some("100"), "2026-04-13", "daily_default")
-        .unwrap();
-    assert!(mid.is_none());
 }
 
 #[test]
