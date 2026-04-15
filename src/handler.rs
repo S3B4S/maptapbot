@@ -200,17 +200,25 @@ impl Handler {
             "hit_list" => {
                 let action = get_str("action").unwrap_or("");
                 let user_id = get_str("user_id");
+                println!("HIT_LIST HIT");
                 match action {
                     "read" => match db.get_hit_list() {
-                        Ok(list) if list.is_empty() => "Hit list is empty.".to_string(),
+                        Ok(list) if list.is_empty() => {
+                            println!("HIT_LIST OK");
+                            "Hit list is empty.".to_string()
+                        },
                         Ok(list) => {
                             let lines: Vec<String> = list
                                 .iter()
                                 .map(|(id, name)| format!("{} ({})", name, id))
                                 .collect();
+                            println!("HIT_LIST OK");
                             format!("**Hit list ({}):**\n{}", list.len(), lines.join("\n"))
                         }
-                        Err(e) => format!("DB error: {}", e),
+                        Err(e) => {
+                            println!("HIT_LIST ERROR");
+                            format!("DB error: {}", e)
+                        },
                     },
                     "add" => match user_id {
                         None => "Provide a `user_id` to add.".to_string(),
