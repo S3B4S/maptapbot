@@ -764,6 +764,15 @@ impl Database {
         Ok(rows)
     }
 
+    pub fn is_on_hit_list(&self, user_id: u64) -> Result<bool, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM hit_list WHERE user_id = ?1",
+            params![user_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Create a backup of the database using SQLite's backup API.
     /// This is safe to call while the database is open and handles in-progress transactions.
     pub fn backup(&self, dest_path: &str) -> Result<(), rusqlite::Error> {

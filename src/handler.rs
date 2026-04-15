@@ -541,8 +541,58 @@ impl EventHandler for Handler {
                     mode_label, msg.author.name, date_str, final_score
                 );
 
-                // React with 🗺️ instead of sending a reply message.
-                let _ = msg.react(&ctx.http, '🗺').await;
+                // Check if this user is on the hit list and suspiciously good.
+                let on_hit_list = self
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.is_on_hit_list(user_id).ok())
+                    .unwrap_or(false);
+
+                if on_hit_list && final_score > 900 {
+                    let taunts = [
+                        format!(
+                            "Okay {} … {} points? OBVIOUSLY cheating. \
+                            Did you just speedrun the map with your eyes closed or did you \
+                            have the answers tattooed on your hand? Either way, suspicious. \
+                            Very, VERY suspicious. 🕵️",
+                            msg.author.name, final_score
+                        ),
+                        format!(
+                            "{} scored {}?? Sure, totally believable. \
+                            And I suppose you also just *happen* to know every capital city \
+                            by heart, yeah? 🙄",
+                            msg.author.name, final_score
+                        ),
+                        format!(
+                            "Wow, {} points from {}! That's… impressive. \
+                            Almost like someone had a little sneak peek before submitting. \
+                            Not naming names. But it's you. It's definitely you. 👀",
+                            final_score, msg.author.name
+                        ),
+                        format!(
+                            "Breaking news: {} allegedly scores {} without any funny business. \
+                            Sources describe the claim as 'laughable', 'deeply sus', \
+                            and 'we're not buying it'. More at 11. 📰",
+                            msg.author.name, final_score
+                        ),
+                        format!(
+                            "{} really thought they could slide a {} past us. \
+                            Honey, the audacity. The SHEER audacity. \
+                            Your map knowledge isn't THAT good. 💅",
+                            msg.author.name, final_score
+                        ),
+                    ];
+                    let idx = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as usize)
+                        .unwrap_or(0)
+                        % taunts.len();
+                    let _ = msg.reply(&ctx.http, &taunts[idx]).await;
+                } else {
+                    // React with 🗺️ instead of sending a reply message.
+                    let _ = msg.react(&ctx.http, '🗺').await;
+                }
             }
             Err(e) => {
                 warn!("Invalid maptap message from {}: {}", msg.author.name, e);
