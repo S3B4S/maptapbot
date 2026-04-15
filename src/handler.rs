@@ -431,6 +431,62 @@ impl Handler {
         Ok(build_full_embed(title, &rows, is_permanent, is_challenge))
     }
 
+    /// Parse and store a single Discord message through the normal score pipeline.
+    ///
+    /// Returns:
+    /// - `None`         — message doesn't match any maptap format (no-op)
+    /// - `Some(Err(e))` — message matched but failed validation or DB write
+    /// - `Some(Ok((user_id, final_score)))` — score saved successfully
+    async fn process_score_message(
+        &self,
+        user_id: u64,
+        username: &str,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+    ) -> Option<Result<(u64, u32), String>> {
+        let result = parse_maptap_message(user_id, guild_id, content)
+            .or_else(|| parse_challenge_message(user_id, guild_id, content))?;
+
+        Some(match result {
+            Ok(mut score) => {
+                score.message_id = message_id;
+                score.channel_id = channel_id;
+
+                let date_str = score.date.format("%Y-%m-%d").to_string();
+                let final_score = score.final_score;
+                let mode_label = match score.mode {
+                    crate::models::GameMode::DailyDefault => "default",
+                    crate::models::GameMode::DailyChallenge => "challenge",
+                };
+
+                let db_result = self
+                    .db
+                    .lock()
+                    .map_err(|e| format!("Failed to lock DB: {}", e))
+                    .and_then(|db| {
+                        db.upsert_user(score.user_id, username)
+                            .map_err(|e| format!("DB error (user): {}", e))?;
+                        db.upsert_score(&score)
+                            .map_err(|e| format!("DB error (score): {}", e))
+                    });
+
+                if let Err(e) = db_result {
+                    error!("{}", e);
+                    return Some(Err(e));
+                }
+
+                info!(
+                    "Saved {} score for user {} on {}: {}",
+                    mode_label, username, date_str, final_score
+                );
+
+                Ok((user_id, final_score))
+            }
+            Err(e) => Err(e),
+        })
+    }
 }
 
 #[async_trait]
@@ -492,55 +548,26 @@ impl EventHandler for Handler {
 
         let user_id = msg.author.id.get();
         let guild_id = msg.guild_id.map(|g| g.get());
-        let content = &msg.content;
 
-        // Try default parser first, then challenge parser.
-        let result = parse_maptap_message(user_id, guild_id, content)
-            .or_else(|| parse_challenge_message(user_id, guild_id, content));
-
-        let result = match result {
-            Some(r) => r,
-            None => return, // Not a maptap message, ignore silently
-        };
+        let result = self
+            .process_score_message(
+                user_id,
+                &msg.author.name,
+                guild_id,
+                msg.channel_id.get(),
+                msg.id.get(),
+                &msg.content,
+            )
+            .await;
 
         match result {
-            Ok(mut score) => {
-                // Attach Discord message metadata (parsers don't have access to these).
-                score.message_id = msg.id.get();
-                score.channel_id = msg.channel_id.get();
-
-                let date_str = score.date.format("%Y-%m-%d").to_string();
-                let final_score = score.final_score;
-                let mode_label = match score.mode {
-                    crate::models::GameMode::DailyDefault => "default",
-                    crate::models::GameMode::DailyChallenge => "challenge",
-                };
-
-                // Scope the lock so it's dropped before any .await
-                let db_result = self
-                    .db
-                    .lock()
-                    .map_err(|e| format!("Failed to lock DB: {}", e))
-                    .and_then(|db| {
-                        db.upsert_user(score.user_id, &msg.author.name)
-                            .map_err(|e| format!("DB error (user): {}", e))?;
-                        db.upsert_score(&score)
-                            .map_err(|e| format!("DB error (score): {}", e))
-                    });
-
-                if let Err(e) = db_result {
-                    error!("{}", e);
-                    let _ = msg
-                        .reply(&ctx.http, "Internal error saving your score.")
-                        .await;
-                    return;
-                }
-
-                info!(
-                    "Saved {} score for user {} on {}: {}",
-                    mode_label, msg.author.name, date_str, final_score
-                );
-
+            None => {} // Not a maptap message, ignore silently
+            Some(Err(e)) => {
+                warn!("Invalid maptap message from {}: {}", msg.author.name, e);
+                let reply = format!("Invalid maptap score: {}", e);
+                let _ = msg.reply(&ctx.http, reply).await;
+            }
+            Some(Ok((_, final_score))) => {
                 // Check if this user is on the hit list and suspiciously good.
                 let on_hit_list = self
                     .db
@@ -593,11 +620,6 @@ impl EventHandler for Handler {
                     // React with 🗺️ instead of sending a reply message.
                     let _ = msg.react(&ctx.http, '🗺').await;
                 }
-            }
-            Err(e) => {
-                warn!("Invalid maptap message from {}: {}", msg.author.name, e);
-                let reply = format!("Invalid maptap score: {}", e);
-                let _ = msg.reply(&ctx.http, reply).await;
             }
         }
     }
@@ -686,6 +708,24 @@ impl EventHandler for Handler {
                         .required(true),
                     )
                     .add_option(user_id_option(false)),
+                CreateCommand::new("parse")
+                    .description("Re-process an existing Discord message through the score pipeline")
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "channel_id",
+                            "Discord channel ID where the message lives",
+                        )
+                        .required(true),
+                    )
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "message_id",
+                            "Discord message ID to parse",
+                        )
+                        .required(true),
+                    ),
             ];
             if let Err(e) = guild_id.set_commands(&ctx.http, admin_commands).await {
                 error!("Failed to register admin guild commands on {}: {}", gid, e);
@@ -858,6 +898,197 @@ impl EventHandler for Handler {
                     );
                     if let Err(e) = cmd.create_response(&ctx.http, response).await {
                         error!("Failed to respond to /backup: {}", e);
+                    }
+                }
+                "parse" => {
+                    if !self.is_admin(invoker_id) {
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("You do not have permission to use this command.")
+                                .ephemeral(true),
+                        );
+                        let _ = cmd.create_response(&ctx.http, response).await;
+                        return;
+                    }
+
+                    let options = cmd.data.options();
+                    let get_str = |key: &str| -> Option<&str> {
+                        options.iter().find_map(|o| {
+                            if o.name == key {
+                                if let serenity::model::application::ResolvedValue::String(s) =
+                                    o.value
+                                {
+                                    return Some(s);
+                                }
+                            }
+                            None
+                        })
+                    };
+
+                    let Some(channel_id_str) = get_str("channel_id") else {
+                        let _ = cmd
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Missing required parameter: channel_id")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    };
+                    let Some(message_id_str) = get_str("message_id") else {
+                        let _ = cmd
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Missing required parameter: message_id")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    };
+
+                    let ch_id = match channel_id_str.parse::<u64>() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(format!(
+                                                "Invalid channel_id `{}`: must be a numeric ID.",
+                                                channel_id_str
+                                            ))
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+                    let msg_id = match message_id_str.parse::<u64>() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(format!(
+                                                "Invalid message_id `{}`: must be a numeric ID.",
+                                                message_id_str
+                                            ))
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    // Fetch the message from Discord.
+                    let fetched_msg = match ctx
+                        .http
+                        .get_message(ChannelId::new(ch_id), MessageId::new(msg_id))
+                        .await
+                    {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(format!(
+                                                "Could not fetch message `{}` in channel `{}`: {}",
+                                                msg_id, ch_id, e
+                                            ))
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    // Channel allowlist check — same rules as live message processing.
+                    if let Some(ref ids) = self.channel_ids {
+                        if !ids.contains(&ch_id) {
+                            let parent_allowed = match ChannelId::new(ch_id)
+                                .to_channel(&ctx.http)
+                                .await
+                            {
+                                Ok(channel) => channel
+                                    .guild()
+                                    .and_then(|gc| gc.parent_id)
+                                    .map_or(false, |pid| ids.contains(&pid.get())),
+                                Err(e) => {
+                                    warn!("Failed to resolve channel {}: {}", ch_id, e);
+                                    false
+                                }
+                            };
+                            if !parent_allowed {
+                                let _ = cmd
+                                    .create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content(format!(
+                                                    "Channel `{}` is not in the allowed list.",
+                                                    ch_id
+                                                ))
+                                                .ephemeral(true),
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+
+                    // Derive guild_id: use the field on the fetched message if present,
+                    // otherwise resolve via the channel.
+                    let msg_guild_id = if let Some(gid) = fetched_msg.guild_id {
+                        Some(gid.get())
+                    } else {
+                        match ChannelId::new(ch_id).to_channel(&ctx.http).await {
+                            Ok(channel) => channel.guild().map(|gc| gc.guild_id.get()),
+                            Err(_) => None,
+                        }
+                    };
+
+                    let parse_result = self
+                        .process_score_message(
+                            fetched_msg.author.id.get(),
+                            &fetched_msg.author.name,
+                            msg_guild_id,
+                            ch_id,
+                            msg_id,
+                            &fetched_msg.content,
+                        )
+                        .await;
+
+                    let content = match parse_result {
+                        None => "No maptap score found in that message.".to_string(),
+                        Some(Err(e)) => format!("Failed to process score: {}", e),
+                        Some(Ok((_, final_score))) => format!(
+                            "Score processed successfully (final score: {}).",
+                            final_score
+                        ),
+                    };
+
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(content)
+                            .ephemeral(true),
+                    );
+                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                        error!("Failed to respond to /parse: {}", e);
                     }
                 }
                 _ => {}
