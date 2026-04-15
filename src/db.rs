@@ -442,16 +442,11 @@ impl Database {
 
     // ── Admin query methods ──────────────────────────────────────────────
 
-    /// Delete a specific score entry. Returns the number of rows deleted (0 or 1).
-    pub fn delete_score(
-        &self,
-        user_id: &str,
-        date: &str,
-        mode: &str,
-    ) -> Result<usize, rusqlite::Error> {
+    /// Delete a specific score entry by message_id. Returns the number of rows deleted (0 or 1).
+    pub fn delete_score(&self, message_id: &str) -> Result<usize, rusqlite::Error> {
         let deleted = self.conn.execute(
-            "DELETE FROM scores WHERE user_id = ?1 AND date = ?2 AND mode = ?3",
-            params![user_id, date, mode],
+            "DELETE FROM scores WHERE message_id = ?1",
+            params![message_id],
         )?;
         Ok(deleted)
     }
@@ -537,17 +532,12 @@ impl Database {
         rows.collect()
     }
 
-    /// Return the raw stored message for a specific score entry.
-    pub fn raw_score(
-        &self,
-        user_id: &str,
-        date: &str,
-        mode: &str,
-    ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT raw_message FROM scores WHERE user_id = ?1 AND date = ?2 AND mode = ?3",
-        )?;
-        let mut rows = stmt.query(params![user_id, date, mode])?;
+    /// Return the raw stored message for a specific score entry by message_id.
+    pub fn raw_score(&self, message_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT raw_message FROM scores WHERE message_id = ?1")?;
+        let mut rows = stmt.query(params![message_id])?;
         match rows.next()? {
             Some(row) => Ok(row.get(0)?),
             None => Ok(None),

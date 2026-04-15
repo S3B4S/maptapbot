@@ -87,18 +87,12 @@ impl Handler {
 
         match name {
             "delete_score" => {
-                let Some(user_id) = get_str("user_id") else {
-                    return "Missing required parameter: user_id".to_string();
+                let Some(message_id) = get_str("message_id") else {
+                    return "Missing required parameter: message_id".to_string();
                 };
-                let Some(date) = get_str("date") else {
-                    return "Missing required parameter: date".to_string();
-                };
-                let Some(mode) = get_str("mode") else {
-                    return "Missing required parameter: mode".to_string();
-                };
-                match db.delete_score(user_id, date, mode) {
-                    Ok(0) => format!("No score found for user `{}` on `{}` (mode: `{}`).", user_id, date, mode),
-                    Ok(n) => format!("Deleted {} score(s) for user `{}` on `{}` (mode: `{}`).", n, user_id, date, mode),
+                match db.delete_score(message_id) {
+                    Ok(0) => format!("No score found for message_id `{}`.", message_id),
+                    Ok(n) => format!("Deleted {} score(s) for message_id `{}`.", n, message_id),
                     Err(e) => format!("DB error: {}", e),
                 }
             }
@@ -133,18 +127,15 @@ impl Handler {
                 Err(e) => format!("DB error: {}", e),
             },
             "raw_score" => {
-                let Some(user_id) = get_str("user_id") else {
-                    return "Missing required parameter: user_id".to_string();
+                let Some(message_id) = get_str("message_id") else {
+                    return "Missing required parameter: message_id".to_string();
                 };
-                let Some(date) = get_str("date") else {
-                    return "Missing required parameter: date".to_string();
-                };
-                let Some(mode) = get_str("mode") else {
-                    return "Missing required parameter: mode".to_string();
-                };
-                match db.raw_score(user_id, date, mode) {
-                    Ok(Some(raw)) => format!("Raw message for `{}` on `{}` (`{}`):\n```\n{}\n```", user_id, date, mode, raw),
-                    Ok(None) => format!("No score found for user `{}` on `{}` (mode: `{}`).", user_id, date, mode),
+                match db.raw_score(message_id) {
+                    Ok(Some(raw)) => format!(
+                        "Raw message for message_id `{}`:\n```\n{}\n```",
+                        message_id, raw
+                    ),
+                    Ok(None) => format!("No score found for message_id `{}`.", message_id),
                     Err(e) => format!("DB error: {}", e),
                 }
             }
@@ -498,17 +489,6 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let mode_option = || {
-            CreateCommandOption::new(
-                CommandOptionType::String,
-                "mode",
-                "Game mode (daily_default or daily_challenge)",
-            )
-            .required(true)
-            .add_string_choice("daily_default", "daily_default")
-            .add_string_choice("daily_challenge", "daily_challenge")
-        };
-
         let user_id_option = |required: bool| {
             CreateCommandOption::new(CommandOptionType::String, "user_id", "Discord user ID")
                 .required(required)
@@ -523,6 +503,15 @@ impl EventHandler for Handler {
             .required(required)
         };
 
+        let message_id_option = || {
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "message_id",
+                "Discord message ID of the score entry",
+            )
+            .required(true)
+        };
+
         let commands = vec![
             // User-facing commands
             CreateCommand::new("today").description("Get a link to today's maptap challenge"),
@@ -535,26 +524,6 @@ impl EventHandler for Handler {
             CreateCommand::new("leaderboard_challenge_permanent")
                 .description("Show the all-time challenge leaderboard for this server"),
             CreateCommand::new("help").description("Show available commands"),
-            // Admin commands
-            CreateCommand::new("delete_score")
-                .description("Delete a specific score entry")
-                .add_option(user_id_option(true))
-                .add_option(date_option(true))
-                .add_option(mode_option()),
-            CreateCommand::new("list_scores")
-                .description("Show all scores for a given user")
-                .add_option(user_id_option(true)),
-            CreateCommand::new("list_all_scores").description("Dump all scores in the database"),
-            CreateCommand::new("list_users").description("List all known users"),
-            CreateCommand::new("raw_score")
-                .description("Show the raw stored message for a score entry")
-                .add_option(user_id_option(true))
-                .add_option(date_option(true))
-                .add_option(mode_option()),
-            CreateCommand::new("clear_day")
-                .description("Wipe all scores for a given date")
-                .add_option(date_option(true)),
-            CreateCommand::new("stats").description("Show aggregate DB stats"),
         ];
 
         if let Err(e) =
@@ -569,6 +538,22 @@ impl EventHandler for Handler {
         if let Some(gid) = self.admin_guild_id {
             let guild_id = GuildId::new(gid);
             let admin_commands = vec![
+                CreateCommand::new("delete_score")
+                    .description("Delete a specific score entry")
+                    .add_option(message_id_option()),
+                CreateCommand::new("list_scores")
+                    .description("Show all scores for a given user")
+                    .add_option(user_id_option(true)),
+                CreateCommand::new("list_all_scores")
+                    .description("Dump all scores in the database"),
+                CreateCommand::new("list_users").description("List all known users"),
+                CreateCommand::new("raw_score")
+                    .description("Show the raw stored message for a score entry")
+                    .add_option(message_id_option()),
+                CreateCommand::new("clear_day")
+                    .description("Wipe all scores for a given date")
+                    .add_option(date_option(true)),
+                CreateCommand::new("stats").description("Show aggregate DB stats"),
                 CreateCommand::new("backup")
                     .description("Create a timestamped backup of the database"),
             ];
@@ -1210,15 +1195,17 @@ fn build_help_text(is_admin: bool) -> String {
     text.push_str("`/help` — Show this help message\n");
 
     if is_admin {
-        text.push_str("\n**Admin Commands**\n\n");
-        text.push_str("`/delete_score <user_id> <date> <mode>` — Delete a specific score entry\n");
+        text.push_str("\n**Admin Commands** (registered on the admin guild only)\n\n");
+        text.push_str(
+            "`/delete_score <message_id>` — Delete a specific score entry by message_id\n",
+        );
         text.push_str(
             "`/list_scores <user_id>` — Show all scores for a given user across all dates and modes\n",
         );
         text.push_str("`/list_all_scores` — Dump the full contents of the scores table\n");
         text.push_str("`/list_users` — List all users known to the bot\n");
         text.push_str(
-            "`/raw_score <user_id> <date> <mode>` — Show the raw stored message for a score entry\n",
+            "`/raw_score <message_id>` — Show the raw stored message for a score entry by message_id\n",
         );
         text.push_str("`/clear_day <date>` — Wipe all scores for a given date\n");
         text.push_str("`/stats` — Show aggregate DB stats\n");
