@@ -55,6 +55,26 @@ pub struct DbStats {
     pub daily_challenge_count: i64,
 }
 
+/// A previously-stored `/stats` snapshot for a given invoker.
+#[derive(Debug)]
+pub struct StatsSnapshot {
+    pub taken_at: String,
+    pub stats: DbStats,
+}
+
+/// Summary of score rows touched since a given timestamp.
+/// "Touched" includes both new inserts and upserts (edits) because
+/// `upsert_score` bumps `created_at` on conflict.
+#[derive(Debug)]
+pub struct StatsDelta {
+    pub touched_count: i64,
+    /// Users whose *only* rows are in the touched window — i.e., truly new
+    /// users that didn't exist before `taken_at`. Capped.
+    pub new_users: Vec<(String, String)>,
+    /// Distinct `date` values from touched rows. Capped.
+    pub affected_dates: Vec<String>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -93,6 +113,17 @@ impl Database {
                 created_at    TEXT DEFAULT (datetime('now')),
                 UNIQUE (user_id, guild_id, date, mode),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS stats_snapshots (
+                user_id               TEXT PRIMARY KEY,
+                taken_at              TEXT NOT NULL,
+                total_entries         INTEGER NOT NULL,
+                unique_users          INTEGER NOT NULL,
+                min_date              TEXT,
+                max_date              TEXT,
+                daily_default_count   INTEGER NOT NULL,
+                daily_challenge_count INTEGER NOT NULL
             );",
         )?;
         Ok(())
@@ -585,6 +616,119 @@ impl Database {
             max_date,
             daily_default_count,
             daily_challenge_count,
+        })
+    }
+
+    /// Fetch the most recent `/stats` snapshot for a given invoker, if any.
+    pub fn get_stats_snapshot(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<StatsSnapshot>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT taken_at, total_entries, unique_users, min_date, max_date,
+                    daily_default_count, daily_challenge_count
+             FROM stats_snapshots
+             WHERE user_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![user_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(StatsSnapshot {
+                taken_at: row.get(0)?,
+                stats: DbStats {
+                    total_entries: row.get(1)?,
+                    unique_users: row.get(2)?,
+                    min_date: row.get(3)?,
+                    max_date: row.get(4)?,
+                    daily_default_count: row.get(5)?,
+                    daily_challenge_count: row.get(6)?,
+                },
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert or update the `/stats` snapshot for a given invoker.
+    pub fn upsert_stats_snapshot(
+        &self,
+        user_id: &str,
+        snapshot: &DbStats,
+        taken_at: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO stats_snapshots
+                 (user_id, taken_at, total_entries, unique_users,
+                  min_date, max_date, daily_default_count, daily_challenge_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(user_id) DO UPDATE SET
+                taken_at              = excluded.taken_at,
+                total_entries         = excluded.total_entries,
+                unique_users          = excluded.unique_users,
+                min_date              = excluded.min_date,
+                max_date              = excluded.max_date,
+                daily_default_count   = excluded.daily_default_count,
+                daily_challenge_count = excluded.daily_challenge_count",
+            params![
+                user_id,
+                taken_at,
+                snapshot.total_entries,
+                snapshot.unique_users,
+                snapshot.min_date,
+                snapshot.max_date,
+                snapshot.daily_default_count,
+                snapshot.daily_challenge_count,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Summarize score rows touched (inserted or upserted) since `taken_at`.
+    /// Used to build the "what changed" summary for `/stats` deltas.
+    /// `taken_at` must be in SQLite's `datetime('now')` format (UTC,
+    /// `YYYY-MM-DD HH:MM:SS`) so lexical comparison against `created_at` works.
+    pub fn scores_since(&self, taken_at: &str) -> Result<StatsDelta, rusqlite::Error> {
+        const LIST_CAP: usize = 10;
+
+        // Count of touched rows.
+        let touched_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scores WHERE created_at >= ?1",
+            params![taken_at],
+            |row| row.get(0),
+        )?;
+
+        // Users whose *only* rows are in the touched window — truly new since taken_at.
+        let mut user_stmt = self.conn.prepare(
+            "SELECT s.user_id, COALESCE(u.username, s.user_id) AS username
+             FROM scores s
+             LEFT JOIN users u ON s.user_id = u.user_id
+             WHERE s.created_at >= ?1
+               AND s.user_id NOT IN (
+                   SELECT user_id FROM scores WHERE created_at < ?1
+               )
+             GROUP BY s.user_id
+             ORDER BY MIN(s.created_at)
+             LIMIT ?2",
+        )?;
+        let new_users: Vec<(String, String)> = user_stmt
+            .query_map(params![taken_at, LIST_CAP as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Distinct affected dates.
+        let mut date_stmt = self.conn.prepare(
+            "SELECT DISTINCT date FROM scores
+             WHERE created_at >= ?1
+             ORDER BY date
+             LIMIT ?2",
+        )?;
+        let affected_dates: Vec<String> = date_stmt
+            .query_map(params![taken_at, LIST_CAP as i64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(StatsDelta {
+            touched_count,
+            new_users,
+            affected_dates,
         })
     }
 
