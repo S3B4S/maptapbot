@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get install -y sqlite3
+
 COPY --from=builder /app/target/release/maptapbot ./maptapbot
 
 # Default DB path — override with DATABASE_PATH env var and mount a volume
