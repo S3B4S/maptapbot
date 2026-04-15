@@ -255,7 +255,7 @@ fn extract_header_portion(line: &str) -> Option<String> {
 /// Returns Ok(date) if `date` is at most 1 day ahead of today, Err otherwise.
 /// +1 day is allowed to accommodate users in timezones ahead of the server.
 fn check_date_not_future(date: NaiveDate) -> Result<NaiveDate, String> {
-    let tomorrow = (Utc::now() + chrono::Duration::days(1)).date_naive();
+    let tomorrow = (Utc::now() + chrono::Duration::days(2)).date_naive();
     if date > tomorrow {
         Err("Date cannot be in the future".to_string())
     } else {
