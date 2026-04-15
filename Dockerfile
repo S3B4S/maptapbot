@@ -8,8 +8,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y sqlite3
-
 # Cache dependencies: copy manifests first, build a stub, then replace with
 # real source. This means a code-only change doesn't re-download crates.
 COPY Cargo.toml Cargo.lock ./
