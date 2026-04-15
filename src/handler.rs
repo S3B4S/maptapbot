@@ -443,6 +443,7 @@ impl Handler {
         username: &str,
         guild_id: Option<u64>,
         channel_id: u64,
+        channel_parent_id: Option<u64>,
         message_id: u64,
         content: &str,
     ) -> Option<Result<(u64, u32), String>> {
@@ -453,6 +454,7 @@ impl Handler {
             Ok(mut score) => {
                 score.message_id = message_id;
                 score.channel_id = channel_id;
+                score.channel_parent_id = channel_parent_id;
 
                 let date_str = score.date.format("%Y-%m-%d").to_string();
                 let final_score = score.final_score;
@@ -549,12 +551,40 @@ impl EventHandler for Handler {
         let user_id = msg.author.id.get();
         let guild_id = msg.guild_id.map(|g| g.get());
 
+        // Detect thread parent: Some(parent_channel_id) if the message came from a thread.
+        let channel_parent_id: Option<u64> = 'cpi: {
+            if let Some(guild_id) = msg.guild_id {
+                // Try cache first (no API call).
+                if let Some(guild) = ctx.cache.guild(guild_id) {
+                    let cached = guild
+                        .channels
+                        .get(&msg.channel_id)
+                        .or_else(|| guild.threads.iter().find(|t| t.id == msg.channel_id));
+                    if let Some(channel) = cached {
+                        break 'cpi channel.parent_id.map(|pid| pid.get());
+                    }
+                    // Channel not found in guild cache — fall through to API.
+                }
+                // Fallback: fetch from Discord API.
+                match msg.channel_id.to_channel(&ctx.http).await {
+                    Ok(channel) => {
+                        break 'cpi channel.guild().and_then(|gc| gc.parent_id).map(|pid| pid.get());
+                    }
+                    Err(e) => {
+                        warn!("Failed to resolve channel {} for parent detection: {}", msg.channel_id, e);
+                    }
+                }
+            }
+            None
+        };
+
         let result = self
             .process_score_message(
                 user_id,
                 &msg.author.name,
                 guild_id,
                 msg.channel_id.get(),
+                channel_parent_id,
                 msg.id.get(),
                 &msg.content,
             )
@@ -1062,12 +1092,22 @@ impl EventHandler for Handler {
                         }
                     };
 
+                    // Detect thread parent for the parsed channel.
+                    let parse_channel_parent_id: Option<u64> =
+                        match ChannelId::new(ch_id).to_channel(&ctx.http).await {
+                            Ok(channel) => {
+                                channel.guild().and_then(|gc| gc.parent_id).map(|pid| pid.get())
+                            }
+                            Err(_) => None,
+                        };
+
                     let parse_result = self
                         .process_score_message(
                             fetched_msg.author.id.get(),
                             &fetched_msg.author.name,
                             msg_guild_id,
                             ch_id,
+                            parse_channel_parent_id,
                             msg_id,
                             &fetched_msg.content,
                         )

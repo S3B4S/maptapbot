@@ -6,6 +6,7 @@ fn make_score(scores: [Option<u32>; 5], final_score: u32) -> MaptapScore {
     MaptapScore {
         message_id: 1,
         channel_id: 1,
+        channel_parent_id: None,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyDefault,
@@ -73,6 +74,7 @@ fn test_none_score_valid_in_challenge_mode() {
     let s = MaptapScore {
         message_id: 1,
         channel_id: 1,
+        channel_parent_id: None,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyChallenge,
@@ -91,6 +93,7 @@ fn test_none_score_invalid_in_daily_default() {
     let s = MaptapScore {
         message_id: 1,
         channel_id: 1,
+        channel_parent_id: None,
         user_id: 1,
         guild_id: Some(100),
         mode: GameMode::DailyDefault,

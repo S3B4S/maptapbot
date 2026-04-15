@@ -27,6 +27,7 @@ impl GameMode {
 pub struct MaptapScore {
     pub message_id: u64,
     pub channel_id: u64,
+    pub channel_parent_id: Option<u64>, // Some(id) if posted in a thread; None otherwise
     pub user_id: u64,
     pub guild_id: Option<u64>,
     pub mode: GameMode,

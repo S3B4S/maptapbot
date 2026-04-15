@@ -65,8 +65,9 @@ pub fn parse_maptap_message(
 
     let raw_message = format!("{}\n{}\n{}", header_portion, scores_line, final_line);
     let score = MaptapScore {
-        message_id: 0, // Set by caller (handler) from Discord message metadata
-        channel_id: 0, // Set by caller (handler) from Discord message metadata
+        message_id: 0,          // Set by caller (handler) from Discord message metadata
+        channel_id: 0,          // Set by caller (handler) from Discord message metadata
+        channel_parent_id: None, // Set by caller (handler) from Discord message metadata
         user_id,
         guild_id,
         mode: GameMode::DailyDefault,
@@ -153,8 +154,9 @@ pub fn parse_challenge_message(
         header_line, scores_line, final_line
     );
     let score = MaptapScore {
-        message_id: 0, // Set by caller (handler) from Discord message metadata
-        channel_id: 0, // Set by caller (handler) from Discord message metadata
+        message_id: 0,          // Set by caller (handler) from Discord message metadata
+        channel_id: 0,          // Set by caller (handler) from Discord message metadata
+        channel_parent_id: None, // Set by caller (handler) from Discord message metadata
         user_id,
         guild_id,
         mode: GameMode::DailyChallenge,

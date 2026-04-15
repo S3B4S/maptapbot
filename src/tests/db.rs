@@ -22,6 +22,7 @@ fn make_score(
     MaptapScore {
         message_id: NEXT_MSG_ID.fetch_add(1, Ordering::Relaxed),
         channel_id: 500,
+        channel_parent_id: None,
         user_id,
         guild_id: Some(guild_id),
         mode,
