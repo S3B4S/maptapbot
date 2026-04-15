@@ -79,10 +79,6 @@ impl Handler {
         options: &[serenity::model::application::ResolvedOption<'_>],
         invoker_id: u64,
     ) -> String {
-        println!("Admin command incoming!");
-        println!("{}", name);
-        println!("{}", invoker_id);
-        println!("---");
         let get_str = |key: &str| -> Option<&str> {
             options.iter().find_map(|o| {
                 if o.name == key {
@@ -94,15 +90,11 @@ impl Handler {
             })
         };
 
-        print!("1");
-
         let db = match self.db.lock() {
             Ok(db) => db,
             Err(e) => return format!("Internal error: failed to lock DB: {}", e),
         };
 
-        print!("2");
-        
         match name {
             "delete_score" => {
                 let Some(message_id) = get_str("message_id") else {
@@ -208,25 +200,17 @@ impl Handler {
             "hit_list" => {
                 let action = get_str("action").unwrap_or("");
                 let user_id = get_str("user_id");
-                println!("HIT_LIST HIT");
                 match action {
                     "read" => match db.get_hit_list() {
-                        Ok(list) if list.is_empty() => {
-                            println!("HIT_LIST OK");
-                            "Hit list is empty.".to_string()
-                        },
+                        Ok(list) if list.is_empty() => "Hit list is empty.".to_string(),
                         Ok(list) => {
                             let lines: Vec<String> = list
                                 .iter()
                                 .map(|(id, name)| format!("{} ({})", name, id))
                                 .collect();
-                            println!("HIT_LIST OK");
                             format!("**Hit list ({}):**\n{}", list.len(), lines.join("\n"))
                         }
-                        Err(e) => {
-                            println!("HIT_LIST ERROR");
-                            format!("DB error: {}", e)
-                        },
+                        Err(e) => format!("DB error: {}", e),
                     },
                     "add" => match user_id {
                         None => "Provide a `user_id` to add.".to_string(),
@@ -646,9 +630,9 @@ impl EventHandler for Handler {
                             "action",
                             "read | add | delete",
                         )
-                        .add_string_choice("action", "read")
-                        .add_string_choice("action", "add")
-                        .add_string_choice("action", "delete")
+                        .add_string_choice("read", "read")
+                        .add_string_choice("add", "add")
+                        .add_string_choice("delete", "delete")
                         .required(true),
                     )
                     .add_option(user_id_option(false)),
@@ -776,7 +760,7 @@ impl EventHandler for Handler {
                 }
                 // ── Admin commands ───────────────────────────────────────
                 name @ ("delete_score" | "list_scores" | "list_all_scores" | "list_users"
-                | "raw_score" | "clear_day" | "stats") => {
+                | "raw_score" | "clear_day" | "stats" | "hit_list") => {
                     if !self.is_admin(invoker_id) {
                         let response = CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
