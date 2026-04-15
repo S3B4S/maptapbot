@@ -63,6 +63,15 @@ impl Handler {
         self.admin_ids.contains(&user_id)
     }
 
+    /// Return the current hit list as (user_id, username) pairs.
+    pub fn get_hit_list(&self) -> Vec<(String, String)> {
+        self.db
+            .lock()
+            .ok()
+            .and_then(|db| db.get_hit_list().ok())
+            .unwrap_or_default()
+    }
+
     /// Dispatch an admin command and return the response text.
     fn handle_admin_command(
         &self,
@@ -187,6 +196,47 @@ impl Handler {
                 }
 
                 format!("{}\n{}", current_block, delta_block)
+            }
+            "hit_list" => {
+                let action = get_str("action").unwrap_or("");
+                let user_id = get_str("user_id");
+                match action {
+                    "read" => match db.get_hit_list() {
+                        Ok(list) if list.is_empty() => "Hit list is empty.".to_string(),
+                        Ok(list) => {
+                            let lines: Vec<String> = list
+                                .iter()
+                                .map(|(id, name)| format!("{} ({})", name, id))
+                                .collect();
+                            format!("**Hit list ({}):**\n{}", list.len(), lines.join("\n"))
+                        }
+                        Err(e) => format!("DB error: {}", e),
+                    },
+                    "add" => match user_id {
+                        None => "Provide a `user_id` to add.".to_string(),
+                        Some(id) => match db.add_to_hit_list(id) {
+                            Ok(()) => {
+                                let name = db
+                                    .get_hit_list()
+                                    .ok()
+                                    .and_then(|l| l.into_iter().find(|(uid, _)| uid == id))
+                                    .map(|(_, n)| n)
+                                    .unwrap_or_else(|| id.to_string());
+                                format!("Added {} ({}) to the hit list.", name, id)
+                            }
+                            Err(e) => format!("DB error: {}", e),
+                        },
+                    },
+                    "delete" => match user_id {
+                        None => "Provide a `user_id` to delete.".to_string(),
+                        Some(id) => match db.remove_from_hit_list(id) {
+                            Ok(0) => format!("User `{}` was not on the hit list.", id),
+                            Ok(_) => format!("Removed `{}` from the hit list.", id),
+                            Err(e) => format!("DB error: {}", e),
+                        },
+                    },
+                    _ => "Unknown action. Use `read`, `add`, or `delete`.".to_string(),
+                }
             }
             _ => "Unknown admin command.".to_string(),
         }
@@ -572,6 +622,17 @@ impl EventHandler for Handler {
                 CreateCommand::new("stats").description("Show aggregate DB stats"),
                 CreateCommand::new("backup")
                     .description("Create a timestamped backup of the database"),
+                CreateCommand::new("hit_list")
+                    .description("Manage the hit list of users to mess with")
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "action",
+                            "read | add | delete",
+                        )
+                        .required(true),
+                    )
+                    .add_option(user_id_option(false)),
             ];
             if let Err(e) = guild_id.set_commands(&ctx.http, admin_commands).await {
                 error!("Failed to register admin guild commands on {}: {}", gid, e);

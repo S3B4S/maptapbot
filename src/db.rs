@@ -124,6 +124,10 @@ impl Database {
                 max_date              TEXT,
                 daily_default_count   INTEGER NOT NULL,
                 daily_challenge_count INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS hit_list (
+                user_id TEXT PRIMARY KEY
             );",
         )?;
         Ok(())
@@ -730,6 +734,34 @@ impl Database {
             new_users,
             affected_dates,
         })
+    }
+
+    pub fn add_to_hit_list(&self, user_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO hit_list (user_id) VALUES (?1)",
+            params![user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_from_hit_list(&self, user_id: &str) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM hit_list WHERE user_id = ?1",
+            params![user_id],
+        )
+    }
+
+    pub fn get_hit_list(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT h.user_id, COALESCE(u.username, '<unknown>')
+             FROM hit_list h
+             LEFT JOIN users u ON h.user_id = u.user_id
+             ORDER BY u.username",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Create a backup of the database using SQLite's backup API.
