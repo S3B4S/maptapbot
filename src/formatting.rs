@@ -9,6 +9,30 @@ pub fn truncate_username(name: &str, max_len: usize) -> String {
     }
 }
 
+/// Returns the reaction emoji(s) for a player's 1-indexed daily leaderboard position.
+///
+/// - 1st  → 🥇
+/// - 2nd  → 🥈
+/// - 3rd  → 🥉
+/// - 4–9  → number emoji (4️⃣ … 9️⃣)
+/// - 10+  → 9️⃣ ➕
+pub fn daily_position_reactions(pos: usize) -> Vec<serenity::model::channel::ReactionType> {
+    use serenity::model::channel::ReactionType;
+    match pos {
+        1 => vec![ReactionType::Unicode("🥇".to_string())],
+        2 => vec![ReactionType::Unicode("🥈".to_string())],
+        3 => vec![ReactionType::Unicode("🥉".to_string())],
+        4..=9 => {
+            let digit = (b'0' + pos as u8) as char;
+            vec![ReactionType::Unicode(format!("{}\u{FE0F}\u{20E3}", digit))]
+        }
+        _ => vec![
+            ReactionType::Unicode("9\u{FE0F}\u{20E3}".to_string()),
+            ReactionType::Unicode("\u{2795}".to_string()),
+        ],
+    }
+}
+
 /// Human-readable title for a leaderboard command.
 pub fn leaderboard_title(name: &str) -> &'static str {
     match name {

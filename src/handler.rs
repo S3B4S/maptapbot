@@ -17,7 +17,8 @@ use tracing::{error, info, warn};
 use crate::admin::{admin_commands, handle_admin_cmd};
 use crate::db::{Database};
 use crate::embed::{build_full_embed, build_summary_embed};
-use crate::formatting::leaderboard_title;
+use crate::formatting::{daily_position_reactions, leaderboard_title};
+use crate::models::GameMode;
 use crate::parser::{parse_challenge_message, parse_maptap_message};
 use crate::help::build_help_text;
 
@@ -281,7 +282,7 @@ impl Handler {
         message_id: u64,
         posted_at: DateTime<Utc>,
         content: &str,
-    ) -> Option<Result<(u64, u32), String>> {
+    ) -> Option<Result<(u64, u32, GameMode), String>> {
         let result = parse_maptap_message(user_id, guild_id, content)
             .or_else(|| parse_challenge_message(user_id, guild_id, content))?;
 
@@ -295,9 +296,10 @@ impl Handler {
                 let date_str = score.date.format("%Y-%m-%d").to_string();
                 let final_score = score.final_score;
                 let mode_label = match score.mode {
-                    crate::models::GameMode::DailyDefault => "default",
-                    crate::models::GameMode::DailyChallenge => "challenge",
+                    GameMode::DailyDefault => "default",
+                    GameMode::DailyChallenge => "challenge",
                 };
+                let mode = score.mode.clone();
 
                 let db_result = self
                     .db
@@ -320,7 +322,7 @@ impl Handler {
                     mode_label, username, date_str, final_score
                 );
 
-                Ok((user_id, final_score))
+                Ok((user_id, final_score, mode))
             }
             Err(e) => Err(e),
         })
@@ -436,7 +438,7 @@ impl EventHandler for Handler {
                 let reply = format!("Invalid maptap score: {}", e);
                 let _ = msg.reply(&ctx.http, reply).await;
             }
-            Some(Ok((_, final_score))) => {
+            Some(Ok((_, final_score, mode))) => {
                 // Check if this user is on the hit list and suspiciously good.
                 let on_hit_list = self
                     .db
@@ -486,8 +488,30 @@ impl EventHandler for Handler {
                         % taunts.len();
                     let _ = msg.reply(&ctx.http, &taunts[idx]).await;
                 } else {
-                    // React with 🗺️ instead of sending a reply message.
+                    // React with 🗺️ to confirm the score was recorded.
                     let _ = msg.react(&ctx.http, '🗺').await;
+
+                    // React with an additional emoji reflecting the player's daily rank.
+                    if let Some(gid) = guild_id {
+                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                        let uid_str = user_id.to_string();
+                        let pos = self.db.lock().ok().and_then(|db| {
+                            let rows = match mode {
+                                GameMode::DailyDefault => {
+                                    db.get_daily_leaderboard(gid, &today).ok()?
+                                }
+                                GameMode::DailyChallenge => {
+                                    db.get_daily_challenge_leaderboard(gid, &today).ok()?
+                                }
+                            };
+                            rows.iter().position(|r| r.user_id == uid_str).map(|i| i + 1)
+                        });
+                        if let Some(pos) = pos {
+                            for reaction in daily_position_reactions(pos) {
+                                let _ = msg.react(&ctx.http, reaction).await;
+                            }
+                        }
+                    }
                 }
             }
         }
