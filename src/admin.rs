@@ -161,7 +161,8 @@ pub fn handle_admin_cmd(
     name: &str,
     options: &[serenity::model::application::ResolvedOption<'_>],
     invoker_id: u64,
-    db_param: &std::sync::Mutex<Database>) -> String {
+    db_param: &std::sync::Mutex<Database>,
+    db_path: &str) -> String {
     let get_str = |key: &str| -> Option<&str> {
         options.iter().find_map(|o| {
             if o.name == key {
@@ -283,6 +284,15 @@ pub fn handle_admin_cmd(
             }
 
             format!("{}\n{}", current_block, delta_block)
+        }
+        "backup" => {
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let backup_path = format!("{}.backup_{}", db_path, timestamp);
+
+            match db.backup(&backup_path) {
+                Ok(()) => format!("Backup created: `{}`", backup_path),
+                Err(e) => format!("Backup failed: {}", e),
+            }
         }
         "hit_list" => {
             let action = get_str("action").unwrap_or("");

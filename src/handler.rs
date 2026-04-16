@@ -42,6 +42,14 @@ pub struct Handler {
     db_path: String,
 }
 
+fn handle_today_cmd() -> CreateInteractionResponse {
+    CreateInteractionResponse::Message(
+        CreateInteractionResponseMessage::new()
+            .content("Today's challenge: https://maptap.gg/")
+            .ephemeral(true),
+    )
+}
+
 impl Handler {
     pub fn new(
         db: Database,
@@ -64,16 +72,6 @@ impl Handler {
     /// Check whether a Discord user ID is in the admin list.
     fn is_admin(&self, user_id: u64) -> bool {
         self.admin_ids.contains(&user_id)
-    }
-
-    /// Dispatch an admin command and return the response text.
-    fn handle_admin_command(
-        &self,
-        name: &str,
-        options: &[serenity::model::application::ResolvedOption<'_>],
-        invoker_id: u64,
-    ) -> String {
-        handle_admin_cmd(name, options, invoker_id, &self.db)
     }
 
     /// Look up and remove the previous leaderboard message for (guild_id, cmd).
@@ -596,311 +594,208 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Command(cmd) = interaction {
-            let guild_id = cmd.guild_id.map(|g| g.get());
-            let invoker_id = cmd.user.id.get();
+        match interaction {
+            Interaction::Command(cmd) => {
+                let guild_id = cmd.guild_id.map(|g| g.get());
+                let invoker_id = cmd.user.id.get();
 
-            match cmd.data.name.as_str() {
-                "today" => {
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Today's challenge: https://maptap.gg/")
-                            .ephemeral(true),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /today: {}", e);
+                match cmd.data.name.as_str() {
+                    "today" => {
+                        let response = handle_today_cmd();
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /today: {}", e);
+                        }
                     }
-                }
-                name @ ("leaderboard_daily"
-                | "leaderboard_permanent"
-                | "leaderboard_challenge_daily"
-                | "leaderboard_challenge_permanent") => {
-                    let Some(gid) = guild_id else {
-                        let _ = cmd
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("This command can only be used in a server.")
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    };
+                    name @ ("leaderboard_daily"
+                    | "leaderboard_permanent"
+                    | "leaderboard_challenge_daily"
+                    | "leaderboard_challenge_permanent") => {
+                        let Some(gid) = guild_id else {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content("This command can only be used in a server.")
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        };
 
-                    let embed = match self.build_leaderboard_embed(name, gid) {
-                        Ok(e) => e,
-                        Err(msg) => {
-                            // Empty state — respond ephemeral, no buttons.
+                        let embed = match self.build_leaderboard_embed(name, gid) {
+                            Ok(e) => e,
+                            Err(msg) => {
+                                // Empty state — respond ephemeral, no buttons.
+                                let response = CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(msg)
+                                        .ephemeral(true),
+                                );
+                                let _ = cmd.create_response(&ctx.http, response).await;
+                                return;
+                            }
+                        };
+
+                        let cmd_key = cmd_name_key(name);
+
+                        // Delete the previous leaderboard message for this command, if any.
+                        if let Some((ch_id, msg_id, _)) =
+                            self.take_prev_leaderboard_msg(gid, cmd_key)
+                        {
+                            let _ = ctx.http.delete_message(ch_id, msg_id, None).await;
+                        }
+
+                        // Post the public embed.
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().embed(embed),
+                        );
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /{}: {}", name, e);
+                            return;
+                        }
+
+                        // Retrieve the posted message so we can store its ID for later deletion.
+                        match cmd.get_response(&ctx.http).await {
+                            Ok(posted) => {
+                                self.store_leaderboard_msg(
+                                    gid,
+                                    cmd_key,
+                                    posted.channel_id,
+                                    posted.id,
+                                    invoker_id,
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to retrieve response message for /{}: {}",
+                                    name, e
+                                );
+                            }
+                        }
+
+                        // Send ephemeral follow-up with buttons (only the invoker sees this).
+                        let buttons = CreateActionRow::Buttons(vec![
+                            CreateButton::new(format!("full_lb:{}:{}", name, gid))
+                                .label("Full leaderboard")
+                                .style(ButtonStyle::Primary),
+                            CreateButton::new(format!("remove_lb:{}:{}", name, gid))
+                                .label("Remove")
+                                .style(ButtonStyle::Danger),
+                        ]);
+                        let followup = CreateInteractionResponseFollowup::new()
+                            .content("Leaderboard actions:")
+                            .components(vec![buttons])
+                            .ephemeral(true);
+                        if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                            error!("Failed to send button follow-up for /{}: {}", name, e);
+                        }
+                    }
+                    "help" => {
+                        let content = build_help_text(self.is_admin(invoker_id));
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .ephemeral(true),
+                        );
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /help: {}", e);
+                        }
+                    }
+                    // ── Admin commands ───────────────────────────────────────
+                    name @ ("delete_score"
+                    | "invalidate_score"
+                    | "list_scores"
+                    | "list_all_scores"
+                    | "list_users"
+                    | "raw_score"
+                    | "stats"
+                    | "hit_list"
+                    | "backup") => {
+                        if !self.is_admin(invoker_id) {
                             let response = CreateInteractionResponse::Message(
                                 CreateInteractionResponseMessage::new()
-                                    .content(msg)
+                                    .content("You do not have permission to use this command.")
                                     .ephemeral(true),
                             );
                             let _ = cmd.create_response(&ctx.http, response).await;
                             return;
                         }
-                    };
 
-                    let cmd_key = cmd_name_key(name);
-
-                    // Delete the previous leaderboard message for this command, if any.
-                    if let Some((ch_id, msg_id, _)) =
-                        self.take_prev_leaderboard_msg(gid, cmd_key)
-                    {
-                        let _ = ctx.http.delete_message(ch_id, msg_id, None).await;
+                        let content = handle_admin_cmd(name, &cmd.data.options(), invoker_id, &self.db, &self.db_path);
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .ephemeral(true),
+                        );
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /{}: {}", name, e);
+                        }
                     }
-
-                    // Post the public embed.
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().embed(embed),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /{}: {}", name, e);
-                        return;
-                    }
-
-                    // Retrieve the posted message so we can store its ID for later deletion.
-                    match cmd.get_response(&ctx.http).await {
-                        Ok(posted) => {
-                            self.store_leaderboard_msg(
-                                gid,
-                                cmd_key,
-                                posted.channel_id,
-                                posted.id,
-                                invoker_id,
+                    "parse" => {
+                        if !self.is_admin(invoker_id) {
+                            let response = CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("You do not have permission to use this command.")
+                                    .ephemeral(true),
                             );
+                            let _ = cmd.create_response(&ctx.http, response).await;
+                            return;
                         }
-                        Err(e) => {
-                            error!(
-                                "Failed to retrieve response message for /{}: {}",
-                                name, e
-                            );
-                        }
-                    }
 
-                    // Send ephemeral follow-up with buttons (only the invoker sees this).
-                    let buttons = CreateActionRow::Buttons(vec![
-                        CreateButton::new(format!("full_lb:{}:{}", name, gid))
-                            .label("Full leaderboard")
-                            .style(ButtonStyle::Primary),
-                        CreateButton::new(format!("remove_lb:{}:{}", name, gid))
-                            .label("Remove")
-                            .style(ButtonStyle::Danger),
-                    ]);
-                    let followup = CreateInteractionResponseFollowup::new()
-                        .content("Leaderboard actions:")
-                        .components(vec![buttons])
-                        .ephemeral(true);
-                    if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
-                        error!("Failed to send button follow-up for /{}: {}", name, e);
-                    }
-                }
-                "help" => {
-                    let content = build_help_text(self.is_admin(invoker_id));
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(content)
-                            .ephemeral(true),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /help: {}", e);
-                    }
-                }
-                // ── Admin commands ───────────────────────────────────────
-                name @ ("delete_score" | "invalidate_score" | "list_scores" | "list_all_scores"
-                | "list_users" | "raw_score" | "stats" | "hit_list") => {
-                    if !self.is_admin(invoker_id) {
-                        let response = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("You do not have permission to use this command.")
-                                .ephemeral(true),
-                        );
-                        let _ = cmd.create_response(&ctx.http, response).await;
-                        return;
-                    }
-
-                    let content =
-                        self.handle_admin_command(name, &cmd.data.options(), invoker_id);
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(content)
-                            .ephemeral(true),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /{}: {}", name, e);
-                    }
-                }
-                "backup" => {
-                    if !self.is_admin(invoker_id) {
-                        let response = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("You do not have permission to use this command.")
-                                .ephemeral(true),
-                        );
-                        let _ = cmd.create_response(&ctx.http, response).await;
-                        return;
-                    }
-
-                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                    let backup_path = format!("{}.backup_{}", self.db_path, timestamp);
-
-                    let content = match self.db.lock().unwrap().backup(&backup_path) {
-                        Ok(()) => format!("Backup created: `{}`", backup_path),
-                        Err(e) => format!("Backup failed: {}", e),
-                    };
-
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(content)
-                            .ephemeral(true),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /backup: {}", e);
-                    }
-                }
-                "parse" => {
-                    if !self.is_admin(invoker_id) {
-                        let response = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("You do not have permission to use this command.")
-                                .ephemeral(true),
-                        );
-                        let _ = cmd.create_response(&ctx.http, response).await;
-                        return;
-                    }
-
-                    let options = cmd.data.options();
-                    let get_str = |key: &str| -> Option<&str> {
-                        options.iter().find_map(|o| {
-                            if o.name == key {
-                                if let serenity::model::application::ResolvedValue::String(s) =
-                                    o.value
-                                {
-                                    return Some(s);
+                        let options = cmd.data.options();
+                        let get_str = |key: &str| -> Option<&str> {
+                            options.iter().find_map(|o| {
+                                if o.name == key {
+                                    if let serenity::model::application::ResolvedValue::String(s) =
+                                        o.value
+                                    {
+                                        return Some(s);
+                                    }
                                 }
-                            }
-                            None
-                        })
-                    };
+                                None
+                            })
+                        };
 
-                    let Some(channel_id_str) = get_str("channel_id") else {
-                        let _ = cmd
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("Missing required parameter: channel_id")
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    };
-                    let Some(message_id_str) = get_str("message_id") else {
-                        let _ = cmd
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("Missing required parameter: message_id")
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    };
-
-                    let ch_id = match channel_id_str.parse::<u64>() {
-                        Ok(id) => id,
-                        Err(_) => {
+                        let Some(channel_id_str) = get_str("channel_id") else {
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
                                     CreateInteractionResponse::Message(
                                         CreateInteractionResponseMessage::new()
-                                            .content(format!(
-                                                "Invalid channel_id `{}`: must be a numeric ID.",
-                                                channel_id_str
-                                            ))
+                                            .content("Missing required parameter: channel_id")
                                             .ephemeral(true),
                                     ),
                                 )
                                 .await;
                             return;
-                        }
-                    };
-                    let msg_id = match message_id_str.parse::<u64>() {
-                        Ok(id) => id,
-                        Err(_) => {
+                        };
+                        let Some(message_id_str) = get_str("message_id") else {
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
                                     CreateInteractionResponse::Message(
                                         CreateInteractionResponseMessage::new()
-                                            .content(format!(
-                                                "Invalid message_id `{}`: must be a numeric ID.",
-                                                message_id_str
-                                            ))
+                                            .content("Missing required parameter: message_id")
                                             .ephemeral(true),
                                     ),
                                 )
                                 .await;
                             return;
-                        }
-                    };
+                        };
 
-                    // Fetch the message from Discord.
-                    let fetched_msg = match ctx
-                        .http
-                        .get_message(ChannelId::new(ch_id), MessageId::new(msg_id))
-                        .await
-                    {
-                        Ok(m) => m,
-                        Err(e) => {
-                            let _ = cmd
-                                .create_response(
-                                    &ctx.http,
-                                    CreateInteractionResponse::Message(
-                                        CreateInteractionResponseMessage::new()
-                                            .content(format!(
-                                                "Could not fetch message `{}` in channel `{}`: {}",
-                                                msg_id, ch_id, e
-                                            ))
-                                            .ephemeral(true),
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-                    };
-
-                    // Channel allowlist check — same rules as live message processing.
-                    if let Some(ref ids) = self.channel_ids {
-                        if !ids.contains(&ch_id) {
-                            let parent_allowed = match ChannelId::new(ch_id)
-                                .to_channel(&ctx.http)
-                                .await
-                            {
-                                Ok(channel) => channel
-                                    .guild()
-                                    .and_then(|gc| gc.parent_id)
-                                    .map_or(false, |pid| ids.contains(&pid.get())),
-                                Err(e) => {
-                                    warn!("Failed to resolve channel {}: {}", ch_id, e);
-                                    false
-                                }
-                            };
-                            if !parent_allowed {
+                        let ch_id = match channel_id_str.parse::<u64>() {
+                            Ok(id) => id,
+                            Err(_) => {
                                 let _ = cmd
                                     .create_response(
                                         &ctx.http,
                                         CreateInteractionResponse::Message(
                                             CreateInteractionResponseMessage::new()
                                                 .content(format!(
-                                                    "Channel `{}` is not in the allowed list.",
-                                                    ch_id
+                                                    "Invalid channel_id `{}`: must be a numeric ID.",
+                                                    channel_id_str
                                                 ))
                                                 .ephemeral(true),
                                         ),
@@ -908,169 +803,225 @@ impl EventHandler for Handler {
                                     .await;
                                 return;
                             }
-                        }
-                    }
-
-                    // Derive guild_id: use the field on the fetched message if present,
-                    // otherwise resolve via the channel.
-                    let msg_guild_id = if let Some(gid) = fetched_msg.guild_id {
-                        Some(gid.get())
-                    } else {
-                        match ChannelId::new(ch_id).to_channel(&ctx.http).await {
-                            Ok(channel) => channel.guild().map(|gc| gc.guild_id.get()),
-                            Err(_) => None,
-                        }
-                    };
-
-                    // Detect thread parent for the parsed channel.
-                    let parse_channel_parent_id: Option<u64> =
-                        match ChannelId::new(ch_id).to_channel(&ctx.http).await {
-                            Ok(channel) => {
-                                channel.guild().and_then(|gc| gc.parent_id).map(|pid| pid.get())
+                        };
+                        let msg_id = match message_id_str.parse::<u64>() {
+                            Ok(id) => id,
+                            Err(_) => {
+                                let _ = cmd
+                                    .create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content(format!(
+                                                    "Invalid message_id `{}`: must be a numeric ID.",
+                                                    message_id_str
+                                                ))
+                                                .ephemeral(true),
+                                        ),
+                                    )
+                                    .await;
+                                return;
                             }
-                            Err(_) => None,
                         };
 
-                    let parse_posted_at: DateTime<Utc> = *fetched_msg.timestamp;
+                        // Fetch the message from Discord.
+                        let fetched_msg = match ctx
+                            .http
+                            .get_message(ChannelId::new(ch_id), MessageId::new(msg_id))
+                            .await
+                        {
+                            Ok(m) => m,
+                            Err(e) => {
+                                let _ = cmd
+                                    .create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content(format!(
+                                                    "Could not fetch message `{}` in channel `{}`: {}",
+                                                    msg_id, ch_id, e
+                                                ))
+                                                .ephemeral(true),
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        };
 
-                    let parse_result = self
-                        .process_score_message(
-                            fetched_msg.author.id.get(),
-                            &fetched_msg.author.name,
-                            msg_guild_id,
-                            ch_id,
-                            parse_channel_parent_id,
-                            msg_id,
-                            parse_posted_at,
-                            &fetched_msg.content,
-                        )
-                        .await;
+                        // Channel allowlist check — same rules as live message processing.
+                        if let Some(ref ids) = self.channel_ids {
+                            if !ids.contains(&ch_id) {
+                                let parent_allowed = match ChannelId::new(ch_id)
+                                    .to_channel(&ctx.http)
+                                    .await
+                                {
+                                    Ok(channel) => channel
+                                        .guild()
+                                        .and_then(|gc| gc.parent_id)
+                                        .map_or(false, |pid| ids.contains(&pid.get())),
+                                    Err(e) => {
+                                        warn!("Failed to resolve channel {}: {}", ch_id, e);
+                                        false
+                                    }
+                                };
+                                if !parent_allowed {
+                                    let _ = cmd
+                                        .create_response(
+                                            &ctx.http,
+                                            CreateInteractionResponse::Message(
+                                                CreateInteractionResponseMessage::new()
+                                                    .content(format!(
+                                                        "Channel `{}` is not in the allowed list.",
+                                                        ch_id
+                                                    ))
+                                                    .ephemeral(true),
+                                            ),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
 
-                    let content = match parse_result {
-                        None => "No maptap score found in that message.".to_string(),
-                        Some(Err(e)) => format!("Failed to process score: {}", e),
-                        Some(Ok((_, final_score))) => format!(
-                            "Score processed successfully (final score: {}).",
-                            final_score
-                        ),
-                    };
+                        // Derive guild_id: use the field on the fetched message if present,
+                        // otherwise resolve via the channel.
+                        let msg_guild_id = if let Some(gid) = fetched_msg.guild_id {
+                            Some(gid.get())
+                        } else {
+                            match ChannelId::new(ch_id).to_channel(&ctx.http).await {
+                                Ok(channel) => channel.guild().map(|gc| gc.guild_id.get()),
+                                Err(_) => None,
+                            }
+                        };
 
-                    let response = CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(content)
-                            .ephemeral(true),
-                    );
-                    if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                        error!("Failed to respond to /parse: {}", e);
-                    }
-                }
-                _ => {}
-            }
-        } else if let Interaction::Component(component) = interaction {
-            let custom_id = component.data.custom_id.clone();
+                        // Detect thread parent for the parsed channel.
+                        let parse_channel_parent_id: Option<u64> =
+                            match ChannelId::new(ch_id).to_channel(&ctx.http).await {
+                                Ok(channel) => {
+                                    channel.guild().and_then(|gc| gc.parent_id).map(|pid| pid.get())
+                                }
+                                Err(_) => None,
+                            };
 
-            if let Some(rest) = custom_id.strip_prefix("full_lb:") {
-                // "Full leaderboard" button — create a thread and post the full list.
-                let Some((cmd_name, gid_str)) = rest.split_once(':') else {
-                    warn!("Malformed full_lb custom_id: {}", custom_id);
-                    return;
-                };
-                let Ok(gid) = gid_str.parse::<u64>() else {
-                    warn!("Invalid guild_id in full_lb custom_id: {}", custom_id);
-                    return;
-                };
+                        let parse_posted_at: DateTime<Utc> = *fetched_msg.timestamp;
 
-                // Build the full embed (re-queries the DB for fresh data).
-                let embed = match self.build_full_leaderboard_embed(cmd_name, gid) {
-                    Ok(e) => e,
-                    Err(msg) => {
-                        let ack = CreateInteractionResponse::UpdateMessage(
-                            CreateInteractionResponseMessage::new().content(msg),
+                        let parse_result = self
+                            .process_score_message(
+                                fetched_msg.author.id.get(),
+                                &fetched_msg.author.name,
+                                msg_guild_id,
+                                ch_id,
+                                parse_channel_parent_id,
+                                msg_id,
+                                parse_posted_at,
+                                &fetched_msg.content,
+                            )
+                            .await;
+
+                        let content = match parse_result {
+                            None => "No maptap score found in that message.".to_string(),
+                            Some(Err(e)) => format!("Failed to process score: {}", e),
+                            Some(Ok((_, final_score))) => format!(
+                                "Score processed successfully (final score: {}).",
+                                final_score
+                            ),
+                        };
+
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .ephemeral(true),
                         );
-                        let _ = component.create_response(&ctx.http, ack).await;
-                        return;
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /parse: {}", e);
+                        }
                     }
-                };
-
-                // Look up the public summary message to create a thread on.
-                let cmd_key = cmd_name_key(cmd_name);
-                let stored = self
-                    .leaderboard_msgs
-                    .lock()
-                    .ok()
-                    .and_then(|map| map.get(&(gid, cmd_key)).copied());
-
-                let Some((ch_id, msg_id, _)) = stored else {
-                    let ack = CreateInteractionResponse::UpdateMessage(
-                        CreateInteractionResponseMessage::new()
-                            .content("The leaderboard message is no longer available."),
-                    );
-                    let _ = component.create_response(&ctx.http, ack).await;
-                    return;
-                };
-
-                let in_thread = component
-                    .channel
-                    .as_ref()
-                    .map(|ch| {
-                        matches!(
-                            ch.kind,
-                            ChannelType::PublicThread | ChannelType::PrivateThread
-                        )
-                    })
-                    .unwrap_or(false);
-
-                // Replace the old 2-button ephemeral with a 3-button version.
-                let three_buttons = CreateActionRow::Buttons(vec![
-                    CreateButton::new(format!("full_lb:{}:{}", cmd_name, gid))
-                        .label("Full leaderboard")
-                        .style(ButtonStyle::Primary),
-                    CreateButton::new(format!("remove_lb:{}:{}", cmd_name, gid))
-                        .label("Remove")
-                        .style(ButtonStyle::Danger),
-                    CreateButton::new(format!("remove_full_lb:{}:{}", cmd_name, gid))
-                        .label("Remove full leaderboard")
-                        .style(ButtonStyle::Danger),
-                ]);
-                let update = CreateInteractionResponse::UpdateMessage(
-                    CreateInteractionResponseMessage::new()
-                        .content("Leaderboard actions:")
-                        .components(vec![three_buttons]),
-                );
-                if let Err(e) = component.create_response(&ctx.http, update).await {
-                    error!("Failed to update ephemeral with 3 buttons: {}", e);
-                    return;
+                    _ => {}
                 }
+            }
+            Interaction::Component(cmd) => {
+                let custom_id = cmd.data.custom_id.clone();
 
-                // Post the full leaderboard and track the message.
-                if in_thread {
-                    // Already in a thread — post the full embed directly here.
-                    let msg = CreateMessage::new().embed(embed);
-                    match ch_id.send_message(&ctx.http, msg).await {
-                        Ok(posted) => {
-                            self.store_full_leaderboard_msg(
-                                gid,
-                                cmd_key,
-                                posted.channel_id,
-                                posted.id,
+                match custom_id.splitn(2, ":").collect::<Vec<_>>().as_slice() {
+                    ["full_lb", rest] => {
+                        // "Full leaderboard" button — create a thread and post the full list.
+                        let Some((cmd_name, gid_str)) = rest.split_once(':') else {
+                            warn!("Malformed full_lb custom_id: {}", custom_id);
+                            return;
+                        };
+                        let Ok(gid) = gid_str.parse::<u64>() else {
+                            warn!("Invalid guild_id in full_lb custom_id: {}", custom_id);
+                            return;
+                        };
+
+                        // Build the full embed (re-queries the DB for fresh data).
+                        let embed = match self.build_full_leaderboard_embed(cmd_name, gid) {
+                            Ok(e) => e,
+                            Err(msg) => {
+                                let ack = CreateInteractionResponse::UpdateMessage(
+                                    CreateInteractionResponseMessage::new().content(msg),
+                                );
+                                let _ = cmd.create_response(&ctx.http, ack).await;
+                                return;
+                            }
+                        };
+
+                        // Look up the public summary message to create a thread on.
+                        let cmd_key = cmd_name_key(cmd_name);
+                        let stored = self
+                            .leaderboard_msgs
+                            .lock()
+                            .ok()
+                            .and_then(|map| map.get(&(gid, cmd_key)).copied());
+
+                        let Some((ch_id, msg_id, _)) = stored else {
+                            let ack = CreateInteractionResponse::UpdateMessage(
+                                CreateInteractionResponseMessage::new()
+                                    .content("The leaderboard message is no longer available."),
                             );
+                            let _ = cmd.create_response(&ctx.http, ack).await;
+                            return;
+                        };
+
+                        let in_thread = cmd
+                            .channel
+                            .as_ref()
+                            .map(|ch| {
+                                matches!(
+                                    ch.kind,
+                                    ChannelType::PublicThread | ChannelType::PrivateThread
+                                )
+                            })
+                            .unwrap_or(false);
+
+                        // Replace the old 2-button ephemeral with a 3-button version.
+                        let three_buttons = CreateActionRow::Buttons(vec![
+                            CreateButton::new(format!("full_lb:{}:{}", cmd_name, gid))
+                                .label("Full leaderboard")
+                                .style(ButtonStyle::Primary),
+                            CreateButton::new(format!("remove_lb:{}:{}", cmd_name, gid))
+                                .label("Remove")
+                                .style(ButtonStyle::Danger),
+                            CreateButton::new(format!("remove_full_lb:{}:{}", cmd_name, gid))
+                                .label("Remove full leaderboard")
+                                .style(ButtonStyle::Danger),
+                        ]);
+                        let update = CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new()
+                                .content("Leaderboard actions:")
+                                .components(vec![three_buttons]),
+                        );
+                        if let Err(e) = cmd.create_response(&ctx.http, update).await {
+                            error!("Failed to update ephemeral with 3 buttons: {}", e);
+                            return;
                         }
-                        Err(e) => {
-                            error!("Failed to send full leaderboard in thread: {}", e);
-                        }
-                    }
-                } else {
-                    // Create a public thread on the summary message.
-                    let thread_name = format!("{} — Full", leaderboard_title(cmd_name));
-                    let thread_builder = CreateThread::new(&thread_name);
-                    match ch_id
-                        .create_thread_from_message(&ctx.http, msg_id, thread_builder)
-                        .await
-                    {
-                        Ok(thread) => {
-                            let thread_ch = thread.id;
+
+                        // Post the full leaderboard and track the message.
+                        if in_thread {
+                            // Already in a thread — post the full embed directly here.
                             let msg = CreateMessage::new().embed(embed);
-                            match thread_ch.send_message(&ctx.http, msg).await {
+                            match ch_id.send_message(&ctx.http, msg).await {
                                 Ok(posted) => {
                                     self.store_full_leaderboard_msg(
                                         gid,
@@ -1080,121 +1031,151 @@ impl EventHandler for Handler {
                                     );
                                 }
                                 Err(e) => {
-                                    error!(
-                                        "Failed to send full leaderboard to thread: {}",
-                                        e
-                                    );
+                                    error!("Failed to send full leaderboard in thread: {}", e);
+                                }
+                            }
+                        } else {
+                            // Create a public thread on the summary message.
+                            let thread_name = format!("{} — Full", leaderboard_title(cmd_name));
+                            let thread_builder = CreateThread::new(&thread_name);
+                            match ch_id
+                                .create_thread_from_message(&ctx.http, msg_id, thread_builder)
+                                .await
+                            {
+                                Ok(thread) => {
+                                    let thread_ch = thread.id;
+                                    let msg = CreateMessage::new().embed(embed);
+                                    match thread_ch.send_message(&ctx.http, msg).await {
+                                        Ok(posted) => {
+                                            self.store_full_leaderboard_msg(
+                                                gid,
+                                                cmd_key,
+                                                posted.channel_id,
+                                                posted.id,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to send full leaderboard to thread: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to create thread for full leaderboard: {}", e);
                                 }
                             }
                         }
-                        Err(e) => {
-                            warn!("Failed to create thread for full leaderboard: {}", e);
-                        }
                     }
-                }
-            } else if let Some(rest) = custom_id.strip_prefix("remove_lb:") {
-                // "Remove" button — delete the public summary message.
-                let Some((cmd_name, gid_str)) = rest.split_once(':') else {
-                    warn!("Malformed remove_lb custom_id: {}", custom_id);
-                    return;
-                };
-                let Ok(gid) = gid_str.parse::<u64>() else {
-                    warn!("Invalid guild_id in remove_lb custom_id: {}", custom_id);
-                    return;
-                };
+                    ["remove_lb", rest] => {
+                        // "Remove" button — delete the public summary message.
+                        let Some((cmd_name, gid_str)) = rest.split_once(':') else {
+                            warn!("Malformed remove_lb custom_id: {}", custom_id);
+                            return;
+                        };
+                        let Ok(gid) = gid_str.parse::<u64>() else {
+                            warn!("Invalid guild_id in remove_lb custom_id: {}", custom_id);
+                            return;
+                        };
 
-                let cmd_key = cmd_name_key(cmd_name);
-                let stored = self.take_prev_leaderboard_msg(gid, cmd_key);
+                        let cmd_key = cmd_name_key(cmd_name);
+                        let stored = self.take_prev_leaderboard_msg(gid, cmd_key);
 
-                match stored {
-                    Some((ch_id, msg_id, _)) => {
-                        match ctx.http.delete_message(ch_id, msg_id, None).await {
-                            Ok(_) => {
-                                let ack = CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("Leaderboard removed.")
-                                        .ephemeral(true),
-                                );
-                                let _ = component.create_response(&ctx.http, ack).await;
+                        match stored {
+                            Some((ch_id, msg_id, _)) => {
+                                match ctx.http.delete_message(ch_id, msg_id, None).await {
+                                    Ok(_) => {
+                                        let ack = CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("Leaderboard removed.")
+                                                .ephemeral(true),
+                                        );
+                                        let _ = cmd.create_response(&ctx.http, ack).await;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to delete leaderboard message: {}", e);
+                                        let ack = CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content(
+                                                    "Could not delete the message \
+                                                    (it may have already been removed).",
+                                                )
+                                                .ephemeral(true),
+                                        );
+                                        let _ = cmd.create_response(&ctx.http, ack).await;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                warn!("Failed to delete leaderboard message: {}", e);
-                                let ack = CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content(
-                                            "Could not delete the message \
-                                             (it may have already been removed).",
-                                        )
-                                        .ephemeral(true),
-                                );
-                                let _ = component.create_response(&ctx.http, ack).await;
-                            }
-                        }
-                    }
-                    None => {
-                        let ack = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(
-                                    "The leaderboard message is no longer tracked \
-                                     (it may have already been removed).",
-                                )
-                                .ephemeral(true),
-                        );
-                        let _ = component.create_response(&ctx.http, ack).await;
-                    }
-                }
-            } else if let Some(rest) = custom_id.strip_prefix("remove_full_lb:") {
-                // "Remove full leaderboard" button — delete the full leaderboard message.
-                let Some((cmd_name, gid_str)) = rest.split_once(':') else {
-                    warn!("Malformed remove_full_lb custom_id: {}", custom_id);
-                    return;
-                };
-                let Ok(gid) = gid_str.parse::<u64>() else {
-                    warn!("Invalid guild_id in remove_full_lb custom_id: {}", custom_id);
-                    return;
-                };
-
-                let cmd_key = cmd_name_key(cmd_name);
-                let stored = self.take_full_leaderboard_msg(gid, cmd_key);
-
-                match stored {
-                    Some((ch_id, full_msg_id)) => {
-                        match ctx.http.delete_message(ch_id, full_msg_id, None).await {
-                            Ok(_) => {
-                                let ack = CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("Full leaderboard removed.")
-                                        .ephemeral(true),
-                                );
-                                let _ = component.create_response(&ctx.http, ack).await;
-                            }
-                            Err(e) => {
-                                warn!("Failed to delete full leaderboard message: {}", e);
+                            None => {
                                 let ack = CreateInteractionResponse::Message(
                                     CreateInteractionResponseMessage::new()
                                         .content(
-                                            "Could not delete the full leaderboard \
-                                             (it may have already been removed).",
+                                            "The leaderboard message is no longer tracked \
+                                            (it may have already been removed).",
                                         )
                                         .ephemeral(true),
                                 );
-                                let _ = component.create_response(&ctx.http, ack).await;
+                                let _ = cmd.create_response(&ctx.http, ack).await;
                             }
                         }
                     }
-                    None => {
-                        let ack = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(
-                                    "The full leaderboard message is no longer tracked \
-                                     (it may have already been removed).",
-                                )
-                                .ephemeral(true),
-                        );
-                        let _ = component.create_response(&ctx.http, ack).await;
+                    ["remove_full_lb", rest] => {
+                        // "Remove full leaderboard" button — delete the full leaderboard message.
+                        let Some((cmd_name, gid_str)) = rest.split_once(':') else {
+                            warn!("Malformed remove_full_lb custom_id: {}", custom_id);
+                            return;
+                        };
+                        let Ok(gid) = gid_str.parse::<u64>() else {
+                            warn!("Invalid guild_id in remove_full_lb custom_id: {}", custom_id);
+                            return;
+                        };
+
+                        let cmd_key = cmd_name_key(cmd_name);
+                        let stored = self.take_full_leaderboard_msg(gid, cmd_key);
+
+                        match stored {
+                            Some((ch_id, full_msg_id)) => {
+                                match ctx.http.delete_message(ch_id, full_msg_id, None).await {
+                                    Ok(_) => {
+                                        let ack = CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("Full leaderboard removed.")
+                                                .ephemeral(true),
+                                        );
+                                        let _ = cmd.create_response(&ctx.http, ack).await;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to delete full leaderboard message: {}", e);
+                                        let ack = CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content(
+                                                    "Could not delete the full leaderboard \
+                                                    (it may have already been removed).",
+                                                )
+                                                .ephemeral(true),
+                                        );
+                                        let _ = cmd.create_response(&ctx.http, ack).await;
+                                    }
+                                }
+                            }
+                            None => {
+                                let ack = CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(
+                                            "The full leaderboard message is no longer tracked \
+                                            (it may have already been removed).",
+                                        )
+                                        .ephemeral(true),
+                                );
+                                let _ = cmd.create_response(&ctx.http, ack).await;
+                            }
+                        }
                     }
+                    _ => warn!("Unknown component: {}", custom_id)
                 }
             }
+            _ => {}
         }
     }
 }
