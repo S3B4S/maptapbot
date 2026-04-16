@@ -15,7 +15,7 @@ use serenity::prelude::*;
 use tracing::{error, info, warn};
 
 use crate::admin::handle_admin_cmd;
-use crate::db::{Database, DbStats, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot};
+use crate::db::{Database, LeaderboardRow};
 use crate::parser::{parse_challenge_message, parse_maptap_message};
 use crate::formatting::truncate_username;
 
@@ -64,15 +64,6 @@ impl Handler {
     /// Check whether a Discord user ID is in the admin list.
     fn is_admin(&self, user_id: u64) -> bool {
         self.admin_ids.contains(&user_id)
-    }
-
-    /// Return the current hit list as (user_id, username) pairs.
-    pub fn get_hit_list(&self) -> Vec<(String, String)> {
-        self.db
-            .lock()
-            .ok()
-            .and_then(|db| db.get_hit_list().ok())
-            .unwrap_or_default()
     }
 
     /// Dispatch an admin command and return the response text.
