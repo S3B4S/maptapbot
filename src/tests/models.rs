@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 
 use super::*;
 
@@ -15,6 +15,7 @@ fn make_score(scores: [Option<u32>; 5], final_score: u32) -> MaptapScore {
         scores,
         final_score,
         raw_message: String::new(),
+        posted_at: Utc::now(),
     }
 }
 
@@ -83,6 +84,7 @@ fn test_none_score_valid_in_challenge_mode() {
         scores: [Some(96), Some(4), Some(68), Some(91), None],
         final_score: 509,
         raw_message: String::new(),
+        posted_at: Utc::now(),
     };
     assert!(s.validate().is_ok());
     assert_eq!(s.compute_final_score(), 509);
@@ -102,6 +104,7 @@ fn test_none_score_invalid_in_daily_default() {
         scores: [Some(93), Some(90), Some(83), Some(61), None],
         final_score: 0,
         raw_message: String::new(),
+        posted_at: Utc::now(),
     };
     let err = s.validate().unwrap_err();
     assert!(err.contains("challenge mode"));

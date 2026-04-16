@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use crate::models::{GameMode, MaptapScore};
+use crate::models::MaptapScore;
 
 /// Row returned by leaderboard queries.
 #[derive(Debug)]
@@ -36,6 +36,8 @@ pub struct ScoreRow {
     pub score5: Option<i64>,
     pub final_score: i64,
     pub time_spent_ms: Option<i64>,
+    pub posted_at: String,
+    pub invalid: bool,
 }
 
 /// Row returned by list_users.
@@ -54,6 +56,7 @@ pub struct DbStats {
     pub max_date: Option<String>,
     pub daily_default_count: i64,
     pub daily_challenge_count: i64,
+    pub invalid_entries: i64,
 }
 
 /// A previously-stored `/stats` snapshot for a given invoker.
@@ -113,9 +116,13 @@ impl Database {
                 final_score   INTEGER NOT NULL,
                 raw_message   TEXT,
                 created_at    TEXT DEFAULT (datetime('now')),
-                UNIQUE (user_id, guild_id, date, mode),
+                posted_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                invalid       INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
+
+            CREATE INDEX IF NOT EXISTS idx_scores_effective
+                ON scores(user_id, guild_id, date, mode, invalid, posted_at DESC);
 
             CREATE TABLE IF NOT EXISTS stats_snapshots (
                 user_id               TEXT PRIMARY KEY,
@@ -142,6 +149,9 @@ impl Database {
     /// Migration 2: make score1-5 nullable (keyed on `notnull` flag of score1 column).
     /// Migration 3: add message_id (PK) + channel_id columns (keyed on absence of `message_id` column).
     /// Migration 4: add channel_parent_id column (keyed on absence of `channel_parent_id` column).
+    /// Migration 5: append-only model — drop UNIQUE(user_id,guild_id,date,mode), add
+    ///              posted_at + invalid columns, add effective-row index (keyed on absence
+    ///              of `invalid` column).
     fn migrate(&self) -> Result<(), rusqlite::Error> {
         // Migration 1: add mode column + restructure PK
         let has_mode: bool = {
@@ -301,6 +311,64 @@ impl Database {
                 .execute_batch("ALTER TABLE scores ADD COLUMN channel_parent_id TEXT;")?;
         }
 
+        // Migration 5: drop UNIQUE(user_id,guild_id,date,mode), add posted_at + invalid.
+        let has_invalid: bool = {
+            let mut stmt = self.conn.prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('scores') WHERE name = 'invalid'",
+            )?;
+            let count: i64 = stmt.query_row([], |row| row.get(0))?;
+            count > 0
+        };
+
+        if !has_invalid {
+            self.conn.execute_batch(
+                "BEGIN;
+
+                CREATE TABLE scores_new (
+                    message_id        TEXT PRIMARY KEY,
+                    channel_id        TEXT,
+                    channel_parent_id TEXT,
+                    user_id           TEXT NOT NULL,
+                    guild_id          TEXT,
+                    date              TEXT NOT NULL,
+                    mode              TEXT NOT NULL DEFAULT 'daily_default',
+                    time_spent_ms     INTEGER,
+                    score1            INTEGER,
+                    score2            INTEGER,
+                    score3            INTEGER,
+                    score4            INTEGER,
+                    score5            INTEGER,
+                    final_score       INTEGER NOT NULL,
+                    raw_message       TEXT,
+                    created_at        TEXT DEFAULT (datetime('now')),
+                    posted_at         TEXT NOT NULL DEFAULT (datetime('now')),
+                    invalid           INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
+                INSERT INTO scores_new
+                    (message_id, channel_id, channel_parent_id,
+                     user_id, guild_id, date, mode, time_spent_ms,
+                     score1, score2, score3, score4, score5,
+                     final_score, raw_message, created_at, posted_at, invalid)
+                SELECT
+                    message_id, channel_id, channel_parent_id,
+                    user_id, guild_id, date, mode, time_spent_ms,
+                    score1, score2, score3, score4, score5,
+                    final_score, raw_message, created_at,
+                    COALESCE(created_at, datetime('now')), 0
+                FROM scores;
+
+                DROP TABLE scores;
+                ALTER TABLE scores_new RENAME TO scores;
+
+                CREATE INDEX IF NOT EXISTS idx_scores_effective
+                    ON scores(user_id, guild_id, date, mode, invalid, posted_at DESC);
+
+                COMMIT;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -314,18 +382,25 @@ impl Database {
         Ok(())
     }
 
-    /// Insert or replace a score (latest post wins for same user+guild+date+mode).
-    pub fn upsert_score(&self, score: &MaptapScore) -> Result<(), rusqlite::Error> {
+    /// Insert a score row. Rows are append-only: different Discord messages always
+    /// create new rows. Re-processing the same `message_id` (e.g. via `/parse`) updates
+    /// the existing row in place but does not touch `invalid` — once invalidated, a
+    /// score stays invalidated across re-parses.
+    ///
+    /// The "effective" score for a (user, guild, date, mode) partition is the most
+    /// recent valid row by `posted_at` — see `get_daily_leaderboard` et al.
+    pub fn insert_score(&self, score: &MaptapScore) -> Result<(), rusqlite::Error> {
         let guild_id_str = score.guild_id.map(|g| g.to_string());
         let channel_parent_id_str = score.channel_parent_id.map(|id| id.to_string());
+        let posted_at_str = score.posted_at.format("%Y-%m-%d %H:%M:%S").to_string();
         self.conn.execute(
             "INSERT INTO scores
                  (message_id, channel_id, channel_parent_id,
                   user_id, guild_id, date, mode, time_spent_ms,
-                  score1, score2, score3, score4, score5, final_score, raw_message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-             ON CONFLICT(user_id, guild_id, date, mode) DO UPDATE SET
-                message_id        = excluded.message_id,
+                  score1, score2, score3, score4, score5,
+                  final_score, raw_message, posted_at, invalid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)
+             ON CONFLICT(message_id) DO UPDATE SET
                 channel_id        = excluded.channel_id,
                 channel_parent_id = excluded.channel_parent_id,
                 score1            = excluded.score1,
@@ -336,6 +411,7 @@ impl Database {
                 final_score       = excluded.final_score,
                 time_spent_ms     = excluded.time_spent_ms,
                 raw_message       = excluded.raw_message,
+                posted_at         = excluded.posted_at,
                 created_at        = datetime('now')",
             params![
                 score.message_id.to_string(),
@@ -353,25 +429,40 @@ impl Database {
                 score.scores[4].map(|v| v as i64),
                 score.final_score,
                 score.raw_message,
+                posted_at_str,
             ],
         )?;
         Ok(())
     }
 
-    /// Daily leaderboard (default mode): all scores for a given guild + date,
-    /// sorted by final_score desc.
+    /// Daily leaderboard (default mode): the latest valid score per user for a given
+    /// guild + date, sorted by final_score desc.
+    ///
+    /// Rows are append-only, so a user can have multiple rows for the same
+    /// (guild, date, mode). We pick the most recent valid row by `posted_at`.
     pub fn get_daily_leaderboard(
         &self,
         guild_id: u64,
         date: &str,
     ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id, u.username,
-                    s.score1, s.score2, s.score3, s.score4, s.score5, s.final_score
-             FROM scores s
-             JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1 AND s.date = ?2 AND s.mode = 'daily_default'
-             ORDER BY s.final_score DESC",
+            "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.date = ?2
+                  AND s.mode = 'daily_default'
+             )
+             SELECT e.user_id, u.username,
+                    e.score1, e.score2, e.score3, e.score4, e.score5, e.final_score
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             ORDER BY e.final_score DESC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
             Ok(LeaderboardRow {
@@ -389,25 +480,36 @@ impl Database {
         rows.collect()
     }
 
-    /// Permanent leaderboard (default mode): average scores across all days for a given
-    /// guild, sorted by average final_score desc.
+    /// Permanent leaderboard (default mode): average of each user's effective
+    /// (latest-valid-per-day) scores across all days for a given guild,
+    /// sorted by average final_score desc.
     pub fn get_permanent_leaderboard(
         &self,
         guild_id: u64,
     ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id,
+            "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.mode = 'daily_default'
+             )
+             SELECT e.user_id,
                     u.username,
-                    AVG(s.score1)       as avg_s1,
-                    AVG(s.score2)       as avg_s2,
-                    AVG(s.score3)       as avg_s3,
-                    AVG(s.score4)       as avg_s4,
-                    AVG(s.score5)       as avg_s5,
-                    AVG(s.final_score)  as avg_final
-             FROM scores s
-             JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1 AND s.mode = 'daily_default'
-             GROUP BY s.user_id
+                    AVG(e.score1)       as avg_s1,
+                    AVG(e.score2)       as avg_s2,
+                    AVG(e.score3)       as avg_s3,
+                    AVG(e.score4)       as avg_s4,
+                    AVG(e.score5)       as avg_s5,
+                    AVG(e.final_score)  as avg_final
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             GROUP BY e.user_id
              ORDER BY avg_final DESC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string()], |row| {
@@ -426,21 +528,32 @@ impl Database {
         rows.collect()
     }
 
-    /// Daily challenge leaderboard: all challenge scores for a given guild + date,
-    /// sorted by final_score desc, then time_spent_ms asc (faster is better).
+    /// Daily challenge leaderboard: latest valid challenge score per user for a given
+    /// guild + date, sorted by final_score desc, then time_spent_ms asc.
     pub fn get_daily_challenge_leaderboard(
         &self,
         guild_id: u64,
         date: &str,
     ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id, u.username,
-                    s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms
-             FROM scores s
-             JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1 AND s.date = ?2 AND s.mode = 'daily_challenge'
-             ORDER BY s.final_score DESC, s.time_spent_ms ASC",
+            "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.date = ?2
+                  AND s.mode = 'daily_challenge'
+             )
+             SELECT e.user_id, u.username,
+                    e.score1, e.score2, e.score3, e.score4, e.score5,
+                    e.final_score, e.time_spent_ms
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             ORDER BY e.final_score DESC, e.time_spent_ms ASC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
             Ok(LeaderboardRow {
@@ -458,26 +571,37 @@ impl Database {
         rows.collect()
     }
 
-    /// Permanent challenge leaderboard: average scores + average time across all
-    /// challenge days for a given guild, sorted by avg final_score desc.
+    /// Permanent challenge leaderboard: average of each user's effective
+    /// (latest-valid-per-day) challenge scores across all days for a given guild,
+    /// sorted by avg final_score desc.
     pub fn get_permanent_challenge_leaderboard(
         &self,
         guild_id: u64,
     ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.user_id,
+            "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.mode = 'daily_challenge'
+             )
+             SELECT e.user_id,
                     u.username,
-                    AVG(COALESCE(s.score1, 0)) as avg_s1,
-                    AVG(COALESCE(s.score2, 0)) as avg_s2,
-                    AVG(COALESCE(s.score3, 0)) as avg_s3,
-                    AVG(COALESCE(s.score4, 0)) as avg_s4,
-                    AVG(COALESCE(s.score5, 0)) as avg_s5,
-                    AVG(s.final_score)          as avg_final,
-                    AVG(s.time_spent_ms)        as avg_time
-             FROM scores s
-             JOIN users u ON s.user_id = u.user_id
-             WHERE s.guild_id = ?1 AND s.mode = 'daily_challenge'
-             GROUP BY s.user_id
+                    AVG(COALESCE(e.score1, 0)) as avg_s1,
+                    AVG(COALESCE(e.score2, 0)) as avg_s2,
+                    AVG(COALESCE(e.score3, 0)) as avg_s3,
+                    AVG(COALESCE(e.score4, 0)) as avg_s4,
+                    AVG(COALESCE(e.score5, 0)) as avg_s5,
+                    AVG(e.final_score)          as avg_final,
+                    AVG(e.time_spent_ms)        as avg_time
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             GROUP BY e.user_id
              ORDER BY avg_final DESC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string()], |row| {
@@ -498,7 +622,9 @@ impl Database {
 
     // ── Admin query methods ──────────────────────────────────────────────
 
-    /// Delete a specific score entry by message_id. Returns the number of rows deleted (0 or 1).
+    /// Hard-delete a score entry by message_id. Returns the number of rows deleted (0 or 1).
+    /// Prefer `invalidate_score` for normal "this score shouldn't count" operations —
+    /// hard delete loses the row entirely and is irreversible.
     pub fn delete_score(&self, message_id: &str) -> Result<usize, rusqlite::Error> {
         let deleted = self.conn.execute(
             "DELETE FROM scores WHERE message_id = ?1",
@@ -507,18 +633,30 @@ impl Database {
         Ok(deleted)
     }
 
-    /// List all scores for a given user across all dates and modes.
+    /// Soft-delete: mark a score entry as invalid. The row stays in the table but
+    /// is excluded from leaderboards. If the user previously posted a legit score
+    /// for the same (guild, date, mode), that earlier row becomes the effective score.
+    /// Returns the number of rows updated (0 or 1).
+    pub fn invalidate_score(&self, message_id: &str) -> Result<usize, rusqlite::Error> {
+        let updated = self.conn.execute(
+            "UPDATE scores SET invalid = 1 WHERE message_id = ?1",
+            params![message_id],
+        )?;
+        Ok(updated)
+    }
+
+    /// List all scores for a given user across all dates and modes (includes invalid rows).
     pub fn list_scores(&self, user_id: &str) -> Result<Vec<ScoreRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT s.message_id, s.channel_id, s.channel_parent_id,
                     s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
              FROM scores s
              LEFT JOIN users u ON s.user_id = u.user_id
              WHERE s.user_id = ?1
-             ORDER BY s.date DESC, s.mode",
+             ORDER BY s.date DESC, s.mode, s.posted_at DESC",
         )?;
         let rows = stmt.query_map(params![user_id], |row| {
             Ok(ScoreRow {
@@ -537,22 +675,24 @@ impl Database {
                 score5: row.get(12)?,
                 final_score: row.get(13)?,
                 time_spent_ms: row.get(14)?,
+                posted_at: row.get(15)?,
+                invalid: row.get::<_, i64>(16)? != 0,
             })
         })?;
         rows.collect()
     }
 
-    /// Dump all scores in the table.
+    /// Dump all scores in the table (includes invalid rows).
     pub fn list_all_scores(&self) -> Result<Vec<ScoreRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT s.message_id, s.channel_id, s.channel_parent_id,
                     s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
              FROM scores s
              LEFT JOIN users u ON s.user_id = u.user_id
-             ORDER BY s.date DESC, s.user_id, s.mode",
+             ORDER BY s.date DESC, s.user_id, s.mode, s.posted_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ScoreRow {
@@ -571,6 +711,8 @@ impl Database {
                 score5: row.get(12)?,
                 final_score: row.get(13)?,
                 time_spent_ms: row.get(14)?,
+                posted_at: row.get(15)?,
+                invalid: row.get::<_, i64>(16)? != 0,
             })
         })?;
         rows.collect()
@@ -602,15 +744,8 @@ impl Database {
         }
     }
 
-    /// Delete all scores for a given date. Returns the number of rows deleted.
-    pub fn clear_day(&self, date: &str) -> Result<usize, rusqlite::Error> {
-        let deleted = self
-            .conn
-            .execute("DELETE FROM scores WHERE date = ?1", params![date])?;
-        Ok(deleted)
-    }
-
-    /// Aggregate DB stats: total entries, unique users, date range, per-mode counts.
+    /// Aggregate DB stats: total entries (including invalid), unique users, date range,
+    /// per-mode counts, and invalid-row count.
     pub fn stats(&self) -> Result<DbStats, rusqlite::Error> {
         let total_entries: i64 = self
             .conn
@@ -636,6 +771,11 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
+        let invalid_entries: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scores WHERE invalid = 1",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(DbStats {
             total_entries,
             unique_users,
@@ -643,6 +783,7 @@ impl Database {
             max_date,
             daily_default_count,
             daily_challenge_count,
+            invalid_entries,
         })
     }
 
@@ -668,6 +809,10 @@ impl Database {
                     max_date: row.get(4)?,
                     daily_default_count: row.get(5)?,
                     daily_challenge_count: row.get(6)?,
+                    // The snapshot schema predates the `invalid` column and doesn't
+                    // persist invalid_entries. Loaded snapshots report 0 here —
+                    // harmless because format_delta_block doesn't diff this field.
+                    invalid_entries: 0,
                 },
             })),
             None => Ok(None),

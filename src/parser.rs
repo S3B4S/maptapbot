@@ -76,6 +76,7 @@ pub fn parse_maptap_message(
         scores,
         final_score,
         raw_message,
+        posted_at: Utc::now(), // Overwritten by caller from Discord message metadata
     };
 
     Some(score.validate().map(|_| score))
@@ -165,6 +166,7 @@ pub fn parse_challenge_message(
         scores,
         final_score,
         raw_message,
+        posted_at: Utc::now(), // Overwritten by caller from Discord message metadata
     };
 
     Some(score.validate().map(|_| score))

@@ -1,10 +1,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use chrono::NaiveDate;
+use crate::models::GameMode;
+use chrono::{NaiveDate, Utc};
 
 /// Auto-incrementing counter to generate unique message IDs for tests.
-static NEXT_MSG_ID: AtomicU64 = AtomicU64::new(1);
+/// Starts at 17 digits to mimic Discord snowflakes — keeps lex sort of
+/// `message_id` (TEXT in SQLite) in agreement with numeric order, which
+/// matters because the leaderboard tie-break is `ORDER BY message_id DESC`.
+static NEXT_MSG_ID: AtomicU64 = AtomicU64::new(10_000_000_000_000_000);
 
 fn test_db() -> Database {
     Database::open(":memory:").unwrap()
@@ -31,10 +35,12 @@ fn make_score(
         scores,
         final_score,
         raw_message: "test".to_string(),
+        posted_at: Utc::now(),
     }
 }
 
-/// Helper: upsert user then default-mode score
+/// Helper: upsert user then default-mode score. Returns the inserted message_id
+/// so tests can address the row (e.g. for invalidate).
 fn insert_score(
     db: &Database,
     user_id: u64,
@@ -42,10 +48,10 @@ fn insert_score(
     day: u32,
     scores: [Option<u32>; 5],
     final_score: u32,
-) {
+) -> u64 {
     db.upsert_user(user_id, &format!("user{}", user_id))
         .unwrap();
-    db.upsert_score(&make_score(
+    let score = make_score(
         user_id,
         guild_id,
         day,
@@ -53,8 +59,10 @@ fn insert_score(
         final_score,
         GameMode::DailyDefault,
         None,
-    ))
-    .unwrap();
+    );
+    let msg_id = score.message_id;
+    db.insert_score(&score).unwrap();
+    msg_id
 }
 
 /// Helper: upsert user then challenge-mode score
@@ -66,10 +74,10 @@ fn insert_challenge_score(
     scores: [Option<u32>; 5],
     final_score: u32,
     time_spent_ms: u32,
-) {
+) -> u64 {
     db.upsert_user(user_id, &format!("user{}", user_id))
         .unwrap();
-    db.upsert_score(&make_score(
+    let score = make_score(
         user_id,
         guild_id,
         day,
@@ -77,8 +85,10 @@ fn insert_challenge_score(
         final_score,
         GameMode::DailyChallenge,
         Some(time_spent_ms),
-    ))
-    .unwrap();
+    );
+    let msg_id = score.message_id;
+    db.insert_score(&score).unwrap();
+    msg_id
 }
 
 #[test]
@@ -118,7 +128,11 @@ fn test_insert_and_query() {
 }
 
 #[test]
-fn test_upsert_overwrites() {
+fn test_append_only_latest_post_wins() {
+    // Two posts for the same (user, guild, date, mode) create two rows;
+    // the leaderboard shows the later (higher message_id ⇒ later posted_at)
+    // one. The earlier row is preserved — that's the whole point of the
+    // append-only model.
     let db = test_db();
     insert_score(
         &db,
@@ -140,6 +154,17 @@ fn test_upsert_overwrites() {
     let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].final_score, 823.0);
+
+    // Both rows should still exist in the table.
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM scores WHERE user_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]
@@ -484,10 +509,67 @@ fn test_message_id_stored_as_pk() {
 }
 
 #[test]
-fn test_upsert_overwrites_message_id() {
+fn test_reparse_same_message_updates_in_place() {
+    // Re-processing the same Discord message (same message_id) — e.g. via
+    // /parse — updates the existing row rather than creating a new one.
     let db = test_db();
-    // First insert.
-    insert_score(
+    db.upsert_user(1, "user1").unwrap();
+
+    let first = make_score(
+        1,
+        100,
+        13,
+        [Some(50), Some(50), Some(50), Some(50), Some(50)],
+        600,
+        GameMode::DailyDefault,
+        None,
+    );
+    let msg_id = first.message_id;
+    db.insert_score(&first).unwrap();
+
+    // Same message_id, different parsed content (as if user edited the message
+    // and we re-parsed it).
+    let second = MaptapScore {
+        message_id: msg_id,
+        scores: [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        final_score: 823,
+        ..make_score(
+            1,
+            100,
+            13,
+            [Some(0), Some(0), Some(0), Some(0), Some(0)],
+            0,
+            GameMode::DailyDefault,
+            None,
+        )
+    };
+    db.insert_score(&second).unwrap();
+
+    let count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM scores", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+    assert_eq!(results[0].final_score, 823.0);
+}
+
+#[test]
+fn test_invalidate_falls_back_to_prior_valid_score() {
+    // The headline bug-fix: user posts a legit score, then posts an
+    // overwriting wrong score. Admin invalidates the wrong one. The legit
+    // score (the earlier row) becomes the effective score for the day.
+    let db = test_db();
+    let legit_msg_id = insert_score(
+        &db,
+        1,
+        100,
+        13,
+        [Some(93), Some(90), Some(83), Some(61), Some(97)],
+        823,
+    );
+    let wrong_msg_id = insert_score(
         &db,
         1,
         100,
@@ -496,43 +578,108 @@ fn test_upsert_overwrites_message_id() {
         600,
     );
 
-    let first_msg_id: String = db
+    // Before invalidation: the wrong (later) score is effective.
+    let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+    assert_eq!(results[0].final_score, 600.0);
+
+    // Admin invalidates the wrong one.
+    let updated = db.invalidate_score(&wrong_msg_id.to_string()).unwrap();
+    assert_eq!(updated, 1);
+
+    // After invalidation: the legit (earlier, still-valid) score wins.
+    let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].final_score, 823.0);
+
+    // Both rows still exist in the table; only `invalid` differs.
+    let (total, invalid): (i64, i64) = db
         .conn
         .query_row(
-            "SELECT message_id FROM scores WHERE user_id = '1'",
+            "SELECT COUNT(*), SUM(invalid) FROM scores WHERE user_id = '1'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(invalid, 1);
 
-    // Second insert (same user/guild/date/mode) — should overwrite.
+    // Sanity: invalidating the legit row too drops the user from the board.
+    db.invalidate_score(&legit_msg_id.to_string()).unwrap();
+    let results = db.get_daily_leaderboard(100, "2026-04-13").unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_permanent_leaderboard_ignores_invalidated_rows() {
+    // Each day's effective score is the latest *valid* row. Permanent
+    // average must be taken over effective-per-day rows, not raw rows —
+    // otherwise invalidated throwaway posts pollute the average.
+    let db = test_db();
+    // Day 1: legit 800, then a throwaway 400 that gets invalidated.
+    insert_score(
+        &db,
+        1,
+        100,
+        12,
+        [Some(80), Some(80), Some(80), Some(80), Some(80)],
+        800,
+    );
+    let throwaway = insert_score(
+        &db,
+        1,
+        100,
+        12,
+        [Some(40), Some(40), Some(40), Some(40), Some(40)],
+        400,
+    );
+    db.invalidate_score(&throwaway.to_string()).unwrap();
+    // Day 2: 600.
     insert_score(
         &db,
         1,
         100,
         13,
-        [Some(93), Some(90), Some(83), Some(61), Some(97)],
-        823,
+        [Some(60), Some(60), Some(60), Some(60), Some(60)],
+        600,
     );
 
-    let second_msg_id: String = db
+    let results = db.get_permanent_leaderboard(100).unwrap();
+    assert_eq!(results.len(), 1);
+    // avg over effective-per-day = (800 + 600) / 2 = 700.
+    assert_eq!(results[0].final_score, 700.0);
+}
+
+#[test]
+fn test_invalidate_preserved_across_reparse() {
+    // Re-processing an already-invalidated message must not un-invalidate it.
+    let db = test_db();
+    db.upsert_user(1, "user1").unwrap();
+
+    let score = make_score(
+        1,
+        100,
+        13,
+        [Some(50), Some(50), Some(50), Some(50), Some(50)],
+        600,
+        GameMode::DailyDefault,
+        None,
+    );
+    let msg_id = score.message_id;
+    db.insert_score(&score).unwrap();
+    db.invalidate_score(&msg_id.to_string()).unwrap();
+
+    // Re-parse the same Discord message (same message_id).
+    db.insert_score(&score).unwrap();
+
+    let invalid: i64 = db
         .conn
         .query_row(
-            "SELECT message_id FROM scores WHERE user_id = '1'",
-            [],
+            "SELECT invalid FROM scores WHERE message_id = ?1",
+            [msg_id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-
-    // message_id should have been updated (different auto-incremented value).
-    assert_ne!(first_msg_id, second_msg_id);
-
-    // Only one row should exist.
-    let count: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM scores", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(invalid, 1);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GameMode {
@@ -36,6 +36,7 @@ pub struct MaptapScore {
     pub scores: [Option<u32>; 5],
     pub final_score: u32,
     pub raw_message: String,
+    pub posted_at: DateTime<Utc>,
 }
 
 impl MaptapScore {

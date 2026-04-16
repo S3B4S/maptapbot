@@ -143,9 +143,9 @@ Show all registered users.
 Show the raw stored message for a score entry.
 
 ```
-/clear_day date:<YYYY-MM-DD>
+/invalidate_score message_id:<id>
 ```
-Wipe all scores for a given date.
+Soft-delete a score entry (sets `invalid = 1`). The row stays in the table but is excluded from leaderboards; if the user previously posted a legit score for the same (guild, date, mode), that earlier row becomes the effective score. Prefer this over `/delete_score` for normal "this score shouldn't count" cases.
 
 ```
 /stats

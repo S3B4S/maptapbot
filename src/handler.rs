@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serenity::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
@@ -106,6 +107,20 @@ impl Handler {
                     Err(e) => format!("DB error: {}", e),
                 }
             }
+            "invalidate_score" => {
+                let Some(message_id) = get_str("message_id") else {
+                    return "Missing required parameter: message_id".to_string();
+                };
+                match db.invalidate_score(message_id) {
+                    Ok(0) => format!("No score found for message_id `{}`.", message_id),
+                    Ok(n) => format!(
+                        "Marked {} score(s) as invalid for message_id `{}`. \
+                         The prior valid score (if any) is now effective.",
+                        n, message_id
+                    ),
+                    Err(e) => format!("DB error: {}", e),
+                }
+            }
             "list_scores" => {
                 let Some(user_id) = get_str("user_id") else {
                     return "Missing required parameter: user_id".to_string();
@@ -146,16 +161,6 @@ impl Handler {
                         message_id, raw
                     ),
                     Ok(None) => format!("No score found for message_id `{}`.", message_id),
-                    Err(e) => format!("DB error: {}", e),
-                }
-            }
-            "clear_day" => {
-                let Some(date) = get_str("date") else {
-                    return "Missing required parameter: date".to_string();
-                };
-                match db.clear_day(date) {
-                    Ok(0) => format!("No scores found for date `{}`.", date),
-                    Ok(n) => format!("Deleted {} score(s) for date `{}`.", n, date),
                     Err(e) => format!("DB error: {}", e),
                 }
             }
@@ -445,6 +450,7 @@ impl Handler {
         channel_id: u64,
         channel_parent_id: Option<u64>,
         message_id: u64,
+        posted_at: DateTime<Utc>,
         content: &str,
     ) -> Option<Result<(u64, u32), String>> {
         let result = parse_maptap_message(user_id, guild_id, content)
@@ -455,6 +461,7 @@ impl Handler {
                 score.message_id = message_id;
                 score.channel_id = channel_id;
                 score.channel_parent_id = channel_parent_id;
+                score.posted_at = posted_at;
 
                 let date_str = score.date.format("%Y-%m-%d").to_string();
                 let final_score = score.final_score;
@@ -470,7 +477,7 @@ impl Handler {
                     .and_then(|db| {
                         db.upsert_user(score.user_id, username)
                             .map_err(|e| format!("DB error (user): {}", e))?;
-                        db.upsert_score(&score)
+                        db.insert_score(&score)
                             .map_err(|e| format!("DB error (score): {}", e))
                     });
 
@@ -578,6 +585,8 @@ impl EventHandler for Handler {
             None
         };
 
+        let posted_at: DateTime<Utc> = *msg.timestamp;
+
         let result = self
             .process_score_message(
                 user_id,
@@ -586,6 +595,7 @@ impl EventHandler for Handler {
                 msg.channel_id.get(),
                 channel_parent_id,
                 msg.id.get(),
+                posted_at,
                 &msg.content,
             )
             .await;
@@ -662,15 +672,6 @@ impl EventHandler for Handler {
                 .required(required)
         };
 
-        let date_option = |required: bool| {
-            CreateCommandOption::new(
-                CommandOptionType::String,
-                "date",
-                "Date in YYYY-MM-DD format",
-            )
-            .required(required)
-        };
-
         let message_id_option = || {
             CreateCommandOption::new(
                 CommandOptionType::String,
@@ -718,9 +719,9 @@ impl EventHandler for Handler {
                 CreateCommand::new("raw_score")
                     .description("Show the raw stored message for a score entry")
                     .add_option(message_id_option()),
-                CreateCommand::new("clear_day")
-                    .description("Wipe all scores for a given date")
-                    .add_option(date_option(true)),
+                CreateCommand::new("invalidate_score")
+                    .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
+                    .add_option(message_id_option()),
                 CreateCommand::new("stats").description("Show aggregate DB stats"),
                 CreateCommand::new("backup")
                     .description("Create a timestamped backup of the database"),
@@ -879,8 +880,8 @@ impl EventHandler for Handler {
                     }
                 }
                 // ── Admin commands ───────────────────────────────────────
-                name @ ("delete_score" | "list_scores" | "list_all_scores" | "list_users"
-                | "raw_score" | "clear_day" | "stats" | "hit_list") => {
+                name @ ("delete_score" | "invalidate_score" | "list_scores" | "list_all_scores"
+                | "list_users" | "raw_score" | "stats" | "hit_list") => {
                     if !self.is_admin(invoker_id) {
                         let response = CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
@@ -1101,6 +1102,8 @@ impl EventHandler for Handler {
                             Err(_) => None,
                         };
 
+                    let parse_posted_at: DateTime<Utc> = *fetched_msg.timestamp;
+
                     let parse_result = self
                         .process_score_message(
                             fetched_msg.author.id.get(),
@@ -1109,6 +1112,7 @@ impl EventHandler for Handler {
                             ch_id,
                             parse_channel_parent_id,
                             msg_id,
+                            parse_posted_at,
                             &fetched_msg.content,
                         )
                         .await;
@@ -1609,7 +1613,9 @@ fn build_help_text(is_admin: bool) -> String {
         text.push_str(
             "`/raw_score <message_id>` — Show the raw stored message for a score entry by message_id\n",
         );
-        text.push_str("`/clear_day <date>` — Wipe all scores for a given date\n");
+        text.push_str(
+            "`/invalidate_score <message_id>` — Soft-delete a score entry; prior valid score becomes effective\n",
+        );
         text.push_str("`/stats` — Show aggregate DB stats\n");
         text.push_str("`/backup` — Create a timestamped backup of the database\n");
     }
@@ -1618,19 +1624,21 @@ fn build_help_text(is_admin: bool) -> String {
 }
 
 /// Format score rows into a code-block table, truncated to Discord's message limit.
+/// Shows posted_at and an "INV" marker for invalidated rows so admins can see history.
 fn format_score_rows(rows: &[ScoreRow]) -> String {
     let mut out = format!("**Scores ({} total)**\n```\n", rows.len());
     out.push_str(&format!(
-        "{:<22} {:<16} {:<12} {:<18} {:>6}\n",
-        "User ID", "Username", "Date", "Mode", "Score"
+        "{:<20} {:<14} {:<10} {:<16} {:>5} {:<19} {:<3}\n",
+        "Message ID", "Username", "Date", "Mode", "Score", "Posted At", "Inv"
     ));
-    out.push_str(&"-".repeat(76));
+    out.push_str(&"-".repeat(94));
     out.push('\n');
     for row in rows {
-        let username = truncate_username(&row.username, 16);
+        let username = truncate_username(&row.username, 14);
+        let inv = if row.invalid { "X" } else { "" };
         out.push_str(&format!(
-            "{:<22} {:<16} {:<12} {:<18} {:>6}\n",
-            row.user_id, username, row.date, row.mode, row.final_score,
+            "{:<20} {:<14} {:<10} {:<16} {:>5} {:<19} {:<3}\n",
+            row.message_id, username, row.date, row.mode, row.final_score, row.posted_at, inv,
         ));
     }
     out.push_str("```");
@@ -1646,12 +1654,14 @@ fn format_stats_block(stats: &DbStats) -> String {
     format!(
         "**DB Stats**\n```\n\
          Total entries:    {}\n\
+         Invalidated:      {}\n\
          Unique users:     {}\n\
          Date range:       {}\n\
          daily_default:    {}\n\
          daily_challenge:  {}\n\
          ```",
         stats.total_entries,
+        stats.invalid_entries,
         stats.unique_users,
         date_range,
         stats.daily_default_count,
