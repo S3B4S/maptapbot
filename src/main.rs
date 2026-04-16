@@ -2,6 +2,8 @@ mod db;
 mod handler;
 mod models;
 mod parser;
+mod admin;
+mod formatting;
 
 use handler::Handler;
 use serenity::prelude::*;
