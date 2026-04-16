@@ -121,9 +121,6 @@ impl Database {
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_scores_effective
-                ON scores(user_id, guild_id, date, mode, invalid, posted_at DESC);
-
             CREATE TABLE IF NOT EXISTS stats_snapshots (
                 user_id               TEXT PRIMARY KEY,
                 taken_at              TEXT NOT NULL,
@@ -362,12 +359,16 @@ impl Database {
                 DROP TABLE scores;
                 ALTER TABLE scores_new RENAME TO scores;
 
-                CREATE INDEX IF NOT EXISTS idx_scores_effective
-                    ON scores(user_id, guild_id, date, mode, invalid, posted_at DESC);
-
                 COMMIT;",
             )?;
         }
+
+        // Effective-row index — created after all migrations have ensured the
+        // `invalid` column exists. Idempotent so safe to run on every open.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_scores_effective
+                ON scores(user_id, guild_id, date, mode, invalid, posted_at DESC);",
+        )?;
 
         Ok(())
     }
