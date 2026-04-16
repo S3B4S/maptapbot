@@ -4,6 +4,8 @@ mod models;
 mod parser;
 mod admin;
 mod formatting;
+mod help;
+mod embed;
 
 use handler::Handler;
 use serenity::prelude::*;
