@@ -67,7 +67,7 @@ Both commands post a **public Discord embed**:
 - Format per entry: `<medal> <username> (<total_score>)`
 - If fewer than 3 entries, show only however many exist.
 
-**Field: Bottom 3** (sorted ascending from worst, left to right: rank N, N-1, N-2)
+**Field: Bottom 3** (sorted descending, left to right: rank N-2, N-1, N)
 ```
 💀 dave (341)  💀 eve (298)  💀 frank (201)
 ```

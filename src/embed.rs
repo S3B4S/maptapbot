@@ -85,7 +85,7 @@ fn build_top3_value(
 }
 
 /// Build the "Bottom 3" field value.
-/// Worst-first (rank N, N-1, N-2), only entries that don't overlap with top 3.
+/// Descending order (rank N-2, N-1, N left to right), only entries that don't overlap with top 3.
 fn build_bottom3_value(
     rows: &[LeaderboardRow],
     is_challenge: bool,
@@ -99,7 +99,6 @@ fn build_bottom3_value(
     let start = std::cmp::max(3, len.saturating_sub(3));
     let bottom: Vec<String> = rows[start..len]
         .iter()
-        .rev() // worst first
         .map(|row| format_entry(SKULL, row, is_challenge, is_permanent))
         .collect();
     Some(bottom.join("  "))
