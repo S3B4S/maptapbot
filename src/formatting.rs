@@ -15,7 +15,8 @@ pub fn truncate_username(name: &str, max_len: usize) -> String {
 /// - 2nd  → 🥈
 /// - 3rd  → 🥉
 /// - 4–9  → number emoji (4️⃣ … 9️⃣)
-/// - 10+  → 9️⃣ ➕
+/// - 10   → 🔟
+/// - >10  → 🔟 ➕
 pub fn daily_position_reactions(pos: usize) -> Vec<serenity::model::channel::ReactionType> {
     use serenity::model::channel::ReactionType;
     match pos {
@@ -26,8 +27,9 @@ pub fn daily_position_reactions(pos: usize) -> Vec<serenity::model::channel::Rea
             let digit = (b'0' + pos as u8) as char;
             vec![ReactionType::Unicode(format!("{}\u{FE0F}\u{20E3}", digit))]
         }
+        10 => vec![ReactionType::Unicode("\u{1F51F}".to_string())],
         _ => vec![
-            ReactionType::Unicode("9\u{FE0F}\u{20E3}".to_string()),
+            ReactionType::Unicode("\u{1F51F}".to_string()),
             ReactionType::Unicode("\u{2795}".to_string()),
         ],
     }
