@@ -1,4 +1,7 @@
+use serenity::all::{CommandOptionType, CreateCommand, CreateCommandOption};
+
 use crate::db::{Database, DbStats, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot};
+use crate::discord_command_options::{message_id_option, user_id_option};
 use crate::formatting::truncate_username;
 
 /// Format score rows into a code-block table, truncated to Discord's message limit.
@@ -155,6 +158,11 @@ fn format_elapsed_since(taken_at: &str) -> String {
     } else {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
     }
+}
+
+enum AdminCommand {
+    DeleteScore,
+    InvalidateScore,
 }
 
 pub fn handle_admin_cmd(
@@ -337,4 +345,59 @@ pub fn handle_admin_cmd(
         }
         _ => "Unknown admin command.".to_string(),
     }
+}
+
+pub fn admin_commands() -> Vec<CreateCommand> { 
+    vec![
+        CreateCommand::new("delete_score")
+            .description("Delete a specific score entry")
+            .add_option(message_id_option()),
+        CreateCommand::new("list_scores")
+            .description("Show all scores for a given user")
+            .add_option(user_id_option(true)),
+        CreateCommand::new("list_all_scores")
+            .description("Dump all scores in the database"),
+        CreateCommand::new("list_users").description("List all known users"),
+        CreateCommand::new("raw_score")
+            .description("Show the raw stored message for a score entry")
+            .add_option(message_id_option()),
+        CreateCommand::new("invalidate_score")
+            .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
+            .add_option(message_id_option()),
+        CreateCommand::new("stats").description("Show aggregate DB stats"),
+        CreateCommand::new("backup")
+            .description("Create a timestamped backup of the database"),
+        CreateCommand::new("hit_list")
+            .description("Manage the hit list of users to mess with")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "action",
+                    "read | add | delete",
+                )
+                .add_string_choice("read", "read")
+                .add_string_choice("add", "add")
+                .add_string_choice("delete", "delete")
+                .required(true),
+            )
+            .add_option(user_id_option(false)),
+        CreateCommand::new("parse")
+            .description("Re-process an existing Discord message through the score pipeline")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "channel_id",
+                    "Discord channel ID where the message lives",
+                )
+                .required(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "message_id",
+                    "Discord message ID to parse",
+                )
+                .required(true),
+            ),
+    ]
 }

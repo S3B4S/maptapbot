@@ -6,6 +6,8 @@ mod admin;
 mod formatting;
 mod help;
 mod embed;
+mod discord_command_options;
+mod handler_parse;
 
 use handler::Handler;
 use serenity::prelude::*;

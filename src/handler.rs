@@ -3,20 +3,21 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
+    CreateActionRow, CreateButton, CreateCommand, CreateEmbed,
     CreateInteractionResponse, CreateInteractionResponseFollowup,
     CreateInteractionResponseMessage, CreateMessage, CreateThread,
 };
-use serenity::model::application::{ButtonStyle, CommandOptionType, Interaction};
+use serenity::model::application::{ButtonStyle, Interaction};
 use serenity::model::channel::{ChannelType, Message};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::admin::handle_admin_cmd;
+use crate::admin::{admin_commands, handle_admin_cmd};
 use crate::db::{Database};
 use crate::embed::{build_full_embed, build_summary_embed};
+use crate::formatting::leaderboard_title;
 use crate::parser::{parse_challenge_message, parse_maptap_message};
 use crate::help::build_help_text;
 
@@ -33,7 +34,7 @@ pub struct Handler {
         std::sync::Mutex<HashMap<(u64, &'static str), (ChannelId, MessageId)>>,
     /// Optional allowlist of channel IDs. When `Some`, only messages from these
     /// channels are parsed. When `None`, all channels are processed.
-    channel_ids: Option<Vec<u64>>,
+    pub(crate) channel_ids: Option<Vec<u64>>,
     /// Discord user IDs that have admin privileges.
     admin_ids: Vec<u64>,
     /// Optional guild ID where admin-only commands (e.g. /backup) are registered.
@@ -71,7 +72,7 @@ impl Handler {
     }
 
     /// Check whether a Discord user ID is in the admin list.
-    fn is_admin(&self, user_id: u64) -> bool {
+    pub(crate) fn is_admin(&self, user_id: u64) -> bool {
         self.admin_ids.contains(&user_id)
     }
 
@@ -270,7 +271,7 @@ impl Handler {
     /// - `None`         — message doesn't match any maptap format (no-op)
     /// - `Some(Err(e))` — message matched but failed validation or DB write
     /// - `Some(Ok((user_id, final_score)))` — score saved successfully
-    async fn process_score_message(
+    pub(crate) async fn process_score_message(
         &self,
         user_id: u64,
         username: &str,
@@ -495,20 +496,6 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let user_id_option = |required: bool| {
-            CreateCommandOption::new(CommandOptionType::String, "user_id", "Discord user ID")
-                .required(required)
-        };
-
-        let message_id_option = || {
-            CreateCommandOption::new(
-                CommandOptionType::String,
-                "message_id",
-                "Discord message ID of the score entry",
-            )
-            .required(true)
-        };
-
         let commands = vec![
             // User-facing commands
             CreateCommand::new("today").description("Get a link to today's maptap challenge"),
@@ -534,58 +521,7 @@ impl EventHandler for Handler {
         // Register admin-only commands as guild-specific on ADMIN_GUILD.
         if let Some(gid) = self.admin_guild_id {
             let guild_id = GuildId::new(gid);
-            let admin_commands = vec![
-                CreateCommand::new("delete_score")
-                    .description("Delete a specific score entry")
-                    .add_option(message_id_option()),
-                CreateCommand::new("list_scores")
-                    .description("Show all scores for a given user")
-                    .add_option(user_id_option(true)),
-                CreateCommand::new("list_all_scores")
-                    .description("Dump all scores in the database"),
-                CreateCommand::new("list_users").description("List all known users"),
-                CreateCommand::new("raw_score")
-                    .description("Show the raw stored message for a score entry")
-                    .add_option(message_id_option()),
-                CreateCommand::new("invalidate_score")
-                    .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
-                    .add_option(message_id_option()),
-                CreateCommand::new("stats").description("Show aggregate DB stats"),
-                CreateCommand::new("backup")
-                    .description("Create a timestamped backup of the database"),
-                CreateCommand::new("hit_list")
-                    .description("Manage the hit list of users to mess with")
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "action",
-                            "read | add | delete",
-                        )
-                        .add_string_choice("read", "read")
-                        .add_string_choice("add", "add")
-                        .add_string_choice("delete", "delete")
-                        .required(true),
-                    )
-                    .add_option(user_id_option(false)),
-                CreateCommand::new("parse")
-                    .description("Re-process an existing Discord message through the score pipeline")
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "channel_id",
-                            "Discord channel ID where the message lives",
-                        )
-                        .required(true),
-                    )
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "message_id",
-                            "Discord message ID to parse",
-                        )
-                        .required(true),
-                    ),
-            ];
+            let admin_commands = admin_commands();
             if let Err(e) = guild_id.set_commands(&ctx.http, admin_commands).await {
                 error!("Failed to register admin guild commands on {}: {}", gid, e);
             } else {
@@ -734,210 +670,7 @@ impl EventHandler for Handler {
                             error!("Failed to respond to /{}: {}", name, e);
                         }
                     }
-                    "parse" => {
-                        if !self.is_admin(invoker_id) {
-                            let response = CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("You do not have permission to use this command.")
-                                    .ephemeral(true),
-                            );
-                            let _ = cmd.create_response(&ctx.http, response).await;
-                            return;
-                        }
-
-                        let options = cmd.data.options();
-                        let get_str = |key: &str| -> Option<&str> {
-                            options.iter().find_map(|o| {
-                                if o.name == key {
-                                    if let serenity::model::application::ResolvedValue::String(s) =
-                                        o.value
-                                    {
-                                        return Some(s);
-                                    }
-                                }
-                                None
-                            })
-                        };
-
-                        let Some(channel_id_str) = get_str("channel_id") else {
-                            let _ = cmd
-                                .create_response(
-                                    &ctx.http,
-                                    CreateInteractionResponse::Message(
-                                        CreateInteractionResponseMessage::new()
-                                            .content("Missing required parameter: channel_id")
-                                            .ephemeral(true),
-                                    ),
-                                )
-                                .await;
-                            return;
-                        };
-                        let Some(message_id_str) = get_str("message_id") else {
-                            let _ = cmd
-                                .create_response(
-                                    &ctx.http,
-                                    CreateInteractionResponse::Message(
-                                        CreateInteractionResponseMessage::new()
-                                            .content("Missing required parameter: message_id")
-                                            .ephemeral(true),
-                                    ),
-                                )
-                                .await;
-                            return;
-                        };
-
-                        let ch_id = match channel_id_str.parse::<u64>() {
-                            Ok(id) => id,
-                            Err(_) => {
-                                let _ = cmd
-                                    .create_response(
-                                        &ctx.http,
-                                        CreateInteractionResponse::Message(
-                                            CreateInteractionResponseMessage::new()
-                                                .content(format!(
-                                                    "Invalid channel_id `{}`: must be a numeric ID.",
-                                                    channel_id_str
-                                                ))
-                                                .ephemeral(true),
-                                        ),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        };
-                        let msg_id = match message_id_str.parse::<u64>() {
-                            Ok(id) => id,
-                            Err(_) => {
-                                let _ = cmd
-                                    .create_response(
-                                        &ctx.http,
-                                        CreateInteractionResponse::Message(
-                                            CreateInteractionResponseMessage::new()
-                                                .content(format!(
-                                                    "Invalid message_id `{}`: must be a numeric ID.",
-                                                    message_id_str
-                                                ))
-                                                .ephemeral(true),
-                                        ),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        };
-
-                        // Fetch the message from Discord.
-                        let fetched_msg = match ctx
-                            .http
-                            .get_message(ChannelId::new(ch_id), MessageId::new(msg_id))
-                            .await
-                        {
-                            Ok(m) => m,
-                            Err(e) => {
-                                let _ = cmd
-                                    .create_response(
-                                        &ctx.http,
-                                        CreateInteractionResponse::Message(
-                                            CreateInteractionResponseMessage::new()
-                                                .content(format!(
-                                                    "Could not fetch message `{}` in channel `{}`: {}",
-                                                    msg_id, ch_id, e
-                                                ))
-                                                .ephemeral(true),
-                                        ),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        };
-
-                        // Channel allowlist check — same rules as live message processing.
-                        if let Some(ref ids) = self.channel_ids {
-                            if !ids.contains(&ch_id) {
-                                let parent_allowed = match ChannelId::new(ch_id)
-                                    .to_channel(&ctx.http)
-                                    .await
-                                {
-                                    Ok(channel) => channel
-                                        .guild()
-                                        .and_then(|gc| gc.parent_id)
-                                        .map_or(false, |pid| ids.contains(&pid.get())),
-                                    Err(e) => {
-                                        warn!("Failed to resolve channel {}: {}", ch_id, e);
-                                        false
-                                    }
-                                };
-                                if !parent_allowed {
-                                    let _ = cmd
-                                        .create_response(
-                                            &ctx.http,
-                                            CreateInteractionResponse::Message(
-                                                CreateInteractionResponseMessage::new()
-                                                    .content(format!(
-                                                        "Channel `{}` is not in the allowed list.",
-                                                        ch_id
-                                                    ))
-                                                    .ephemeral(true),
-                                            ),
-                                        )
-                                        .await;
-                                    return;
-                                }
-                            }
-                        }
-
-                        // Derive guild_id: use the field on the fetched message if present,
-                        // otherwise resolve via the channel.
-                        let msg_guild_id = if let Some(gid) = fetched_msg.guild_id {
-                            Some(gid.get())
-                        } else {
-                            match ChannelId::new(ch_id).to_channel(&ctx.http).await {
-                                Ok(channel) => channel.guild().map(|gc| gc.guild_id.get()),
-                                Err(_) => None,
-                            }
-                        };
-
-                        // Detect thread parent for the parsed channel.
-                        let parse_channel_parent_id: Option<u64> =
-                            match ChannelId::new(ch_id).to_channel(&ctx.http).await {
-                                Ok(channel) => {
-                                    channel.guild().and_then(|gc| gc.parent_id).map(|pid| pid.get())
-                                }
-                                Err(_) => None,
-                            };
-
-                        let parse_posted_at: DateTime<Utc> = *fetched_msg.timestamp;
-
-                        let parse_result = self
-                            .process_score_message(
-                                fetched_msg.author.id.get(),
-                                &fetched_msg.author.name,
-                                msg_guild_id,
-                                ch_id,
-                                parse_channel_parent_id,
-                                msg_id,
-                                parse_posted_at,
-                                &fetched_msg.content,
-                            )
-                            .await;
-
-                        let content = match parse_result {
-                            None => "No maptap score found in that message.".to_string(),
-                            Some(Err(e)) => format!("Failed to process score: {}", e),
-                            Some(Ok((_, final_score))) => format!(
-                                "Score processed successfully (final score: {}).",
-                                final_score
-                            ),
-                        };
-
-                        let response = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(content)
-                                .ephemeral(true),
-                        );
-                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                            error!("Failed to respond to /parse: {}", e);
-                        }
-                    }
+                    "parse" => self.handle_parse_cmd(&ctx, &cmd).await,
                     _ => {}
                 }
             }
@@ -1189,16 +922,5 @@ fn cmd_name_key(name: &str) -> &'static str {
         "leaderboard_challenge_daily" => "leaderboard_challenge_daily",
         "leaderboard_challenge_permanent" => "leaderboard_challenge_permanent",
         _ => unreachable!("cmd_name_key called with unexpected name: {}", name),
-    }
-}
-
-/// Human-readable title for a leaderboard command.
-fn leaderboard_title(name: &str) -> &'static str {
-    match name {
-        "leaderboard_daily" => "Daily Leaderboard",
-        "leaderboard_permanent" => "Permanent Leaderboard",
-        "leaderboard_challenge_daily" => "Daily Challenge Leaderboard",
-        "leaderboard_challenge_permanent" => "Permanent Challenge Leaderboard",
-        _ => "Leaderboard",
     }
 }
