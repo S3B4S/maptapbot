@@ -282,7 +282,7 @@ impl Handler {
     /// Returns:
     /// - `None`         — message doesn't match any maptap format (no-op)
     /// - `Some(Err(e))` — message matched but failed validation or DB write
-    /// - `Some(Ok((user_id, final_score)))` — score saved successfully
+    /// - `Some(Ok((user_id, final_score, mode, date)))` — score saved successfully
     pub(crate) async fn process_score_message(
         &self,
         user_id: u64,
@@ -293,7 +293,7 @@ impl Handler {
         message_id: u64,
         posted_at: DateTime<Utc>,
         content: &str,
-    ) -> Option<Result<(u64, u32, GameMode), String>> {
+    ) -> Option<Result<(u64, u32, GameMode, NaiveDate), String>> {
         let result = parse_maptap_message(user_id, guild_id, content)
             .or_else(|| parse_challenge_message(user_id, guild_id, content))?;
 
@@ -304,7 +304,8 @@ impl Handler {
                 score.channel_parent_id = channel_parent_id;
                 score.posted_at = posted_at;
 
-                let date_str = score.date.format("%Y-%m-%d").to_string();
+                let score_date = score.date;
+                let date_str = score_date.format("%Y-%m-%d").to_string();
                 let final_score = score.final_score;
                 let mode_label = match score.mode {
                     GameMode::DailyDefault => "default",
@@ -333,7 +334,7 @@ impl Handler {
                     mode_label, username, date_str, final_score
                 );
 
-                Ok((user_id, final_score, mode))
+                Ok((user_id, final_score, mode, score_date))
             }
             Err(e) => Err(e),
         })
@@ -449,7 +450,7 @@ impl EventHandler for Handler {
                 let reply = format!("Invalid maptap score: {}", e);
                 let _ = msg.reply(&ctx.http, reply).await;
             }
-            Some(Ok((_, final_score, mode))) => {
+            Some(Ok((_, final_score, mode, score_date))) => {
                 // Check if this user is on the hit list and suspiciously good.
                 let on_hit_list = self
                     .db
@@ -504,15 +505,15 @@ impl EventHandler for Handler {
 
                     // React with an additional emoji reflecting the player's daily rank.
                     if let Some(gid) = guild_id {
-                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                        let date_str = score_date.format("%Y-%m-%d").to_string();
                         let uid_str = user_id.to_string();
                         let pos = self.db.lock().ok().and_then(|db| {
                             let rows = match mode {
                                 GameMode::DailyDefault => {
-                                    db.get_daily_leaderboard(gid, &today).ok()?
+                                    db.get_daily_leaderboard(gid, &date_str).ok()?
                                 }
                                 GameMode::DailyChallenge => {
-                                    db.get_daily_challenge_leaderboard(gid, &today).ok()?
+                                    db.get_daily_challenge_leaderboard(gid, &date_str).ok()?
                                 }
                             };
                             rows.iter().position(|r| r.user_id == uid_str).map(|i| i + 1)

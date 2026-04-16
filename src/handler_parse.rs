@@ -196,7 +196,7 @@ impl Handler {
         let content = match parse_result {
             None => "No maptap score found in that message.".to_string(),
             Some(Err(e)) => format!("Failed to process score: {}", e),
-            Some(Ok((_, final_score, _))) => format!(
+            Some(Ok((_, final_score, _, _))) => format!(
                 "Score processed successfully (final score: {}).",
                 final_score
             ),
