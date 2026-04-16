@@ -651,14 +651,15 @@ impl EventHandler for Handler {
                             let day   = get_int("day")   .unwrap_or(now.day()   as i64) as u32;
                             let month = get_int("month") .unwrap_or(now.month() as i64) as u32;
                             let year  = get_int("year")  .unwrap_or(now.year()  as i64) as i32;
+                            let max_date = now + chrono::Duration::weeks(1);
                             match NaiveDate::from_ymd_opt(year, month, day) {
-                                Some(d) if d <= now => Some(d),
+                                Some(d) if d <= max_date => Some(d),
                                 Some(_) => {
                                     let _ = cmd.create_response(
                                         &ctx.http,
                                         CreateInteractionResponse::Message(
                                             CreateInteractionResponseMessage::new()
-                                                .content("That date is in the future.")
+                                                .content("That date is more than a week away.")
                                                 .ephemeral(true),
                                         ),
                                     ).await;
