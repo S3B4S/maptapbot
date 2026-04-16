@@ -1,5 +1,6 @@
 // ── Embed constants ─────────────────────────────────────────────────────
 
+use chrono::NaiveDate;
 use serenity::all::CreateEmbed;
 
 use crate::{db::LeaderboardRow, formatting::truncate_username};
@@ -29,15 +30,17 @@ fn leaderboard_url(is_challenge: bool) -> &'static str {
 }
 
 /// Build the embed description (header line).
-fn build_description(count: usize, is_permanent: bool, is_challenge: bool) -> String {
+/// `date` is used for daily leaderboards; `None` falls back to today (UTC).
+/// Ignored when `is_permanent` is true.
+fn build_description(count: usize, is_permanent: bool, is_challenge: bool, date: Option<NaiveDate>) -> String {
     let url = leaderboard_url(is_challenge);
     if is_permanent {
         format!("All-time \u{00b7} {} players \u{00b7} {}", count, url)
     } else {
-        let now = chrono::Utc::now();
-        let day = now.format("%A, %B %-d").to_string();
+        let d = date.unwrap_or_else(|| chrono::Utc::now().date_naive());
+        let day = d.format("%A, %B %-d").to_string();
         format!(
-            "{} \u{00b7} {} players submitted \u{00b7} {}",
+            "{} (UTC) \u{00b7} {} players submitted \u{00b7} {}",
             day, count, url
         )
     }
@@ -103,14 +106,16 @@ fn build_bottom3_value(
 }
 
 /// Build a summary embed for the leaderboard.
+/// `date` is the leaderboard date for daily commands; `None` for permanent or "today".
 pub fn build_summary_embed(
     title: &str,
     rows: &[LeaderboardRow],
     is_permanent: bool,
     is_challenge: bool,
+    date: Option<NaiveDate>,
 ) -> CreateEmbed {
     let color = embed_color(is_challenge);
-    let desc = build_description(rows.len(), is_permanent, is_challenge);
+    let desc = build_description(rows.len(), is_permanent, is_challenge, date);
     let top3 = build_top3_value(rows, is_challenge, is_permanent);
 
     let mut embed = CreateEmbed::new()
@@ -128,14 +133,16 @@ pub fn build_summary_embed(
 
 /// Build the full-list embed posted into a thread.
 /// Lists every entry ranked, truncated to fit Discord's 4096-char embed description limit.
+/// `date` is the leaderboard date for daily commands; `None` for permanent or "today".
 pub fn build_full_embed(
     title: &str,
     rows: &[LeaderboardRow],
     is_permanent: bool,
     is_challenge: bool,
+    date: Option<NaiveDate>,
 ) -> CreateEmbed {
     let color = embed_color(is_challenge);
-    let desc = build_description(rows.len(), is_permanent, is_challenge);
+    let desc = build_description(rows.len(), is_permanent, is_challenge, date);
 
     let mut lines = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateButton, CreateCommand, CreateEmbed,
+    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
     CreateInteractionResponse, CreateInteractionResponseFollowup,
     CreateInteractionResponseMessage, CreateMessage, CreateThread,
 };
-use serenity::model::application::{ButtonStyle, Interaction};
+use serenity::model::application::{ButtonStyle, CommandOptionType, Interaction, ResolvedValue};
 use serenity::model::channel::{ChannelType, Message};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
@@ -129,22 +129,25 @@ impl Handler {
     }
 
     /// Build the leaderboard summary embed for the given command.
+    /// `date` is used for daily commands; `None` defaults to today (UTC).
     /// Returns `Ok(embed)` on success, or `Err(empty_state_message)` when there are no entries.
-    fn build_leaderboard_embed(&self, name: &str, gid: u64) -> Result<CreateEmbed, String> {
+    fn build_leaderboard_embed(&self, name: &str, gid: u64, date: Option<NaiveDate>) -> Result<CreateEmbed, String> {
         let db = self.db.lock().unwrap();
         match name {
             "leaderboard_daily" => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                db.get_daily_leaderboard(gid, &today)
+                let d = date.unwrap_or_else(|| Utc::now().date_naive());
+                let date_str = d.format("%Y-%m-%d").to_string();
+                db.get_daily_leaderboard(gid, &date_str)
                     .map(|rows| {
                         if rows.is_empty() {
-                            Err("No scores recorded for today yet!".to_string())
+                            Err("No scores recorded for that day yet!".to_string())
                         } else {
                             Ok(build_summary_embed(
                                 "Daily Leaderboard",
                                 &rows,
                                 false,
                                 false,
+                                Some(d),
                             ))
                         }
                     })
@@ -164,6 +167,7 @@ impl Handler {
                             &rows,
                             true,
                             false,
+                            None,
                         ))
                     }
                 })
@@ -172,17 +176,19 @@ impl Handler {
                     Err("Internal error fetching leaderboard.".to_string())
                 }),
             "leaderboard_challenge_daily" => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                db.get_daily_challenge_leaderboard(gid, &today)
+                let d = date.unwrap_or_else(|| Utc::now().date_naive());
+                let date_str = d.format("%Y-%m-%d").to_string();
+                db.get_daily_challenge_leaderboard(gid, &date_str)
                     .map(|rows| {
                         if rows.is_empty() {
-                            Err("No challenge scores recorded for today yet!".to_string())
+                            Err("No challenge scores recorded for that day yet!".to_string())
                         } else {
                             Ok(build_summary_embed(
                                 "Daily Challenge Leaderboard",
                                 &rows,
                                 false,
                                 true,
+                                Some(d),
                             ))
                         }
                     })
@@ -202,6 +208,7 @@ impl Handler {
                             &rows,
                             true,
                             true,
+                            None,
                         ))
                     }
                 })
@@ -214,33 +221,36 @@ impl Handler {
     }
 
     /// Build the full leaderboard embed (all entries) for the thread view.
-    fn build_full_leaderboard_embed(&self, name: &str, gid: u64) -> Result<CreateEmbed, String> {
+    /// `date` is used for daily commands; `None` defaults to today (UTC).
+    fn build_full_leaderboard_embed(&self, name: &str, gid: u64, date: Option<NaiveDate>) -> Result<CreateEmbed, String> {
         let db = self.db.lock().unwrap();
-        let (title, rows, is_permanent, is_challenge) = match name {
+        let (title, rows, is_permanent, is_challenge, resolved_date) = match name {
             "leaderboard_daily" => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                let rows = db.get_daily_leaderboard(gid, &today).map_err(|e| {
+                let d = date.unwrap_or_else(|| Utc::now().date_naive());
+                let date_str = d.format("%Y-%m-%d").to_string();
+                let rows = db.get_daily_leaderboard(gid, &date_str).map_err(|e| {
                     error!("DB error: {}", e);
                     "Internal error fetching leaderboard.".to_string()
                 })?;
-                ("Daily Leaderboard — Full", rows, false, false)
+                ("Daily Leaderboard — Full", rows, false, false, Some(d))
             }
             "leaderboard_permanent" => {
                 let rows = db.get_permanent_leaderboard(gid).map_err(|e| {
                     error!("DB error: {}", e);
                     "Internal error fetching leaderboard.".to_string()
                 })?;
-                ("Permanent Leaderboard — Full", rows, true, false)
+                ("Permanent Leaderboard — Full", rows, true, false, None)
             }
             "leaderboard_challenge_daily" => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let d = date.unwrap_or_else(|| Utc::now().date_naive());
+                let date_str = d.format("%Y-%m-%d").to_string();
                 let rows = db
-                    .get_daily_challenge_leaderboard(gid, &today)
+                    .get_daily_challenge_leaderboard(gid, &date_str)
                     .map_err(|e| {
                         error!("DB error: {}", e);
                         "Internal error fetching leaderboard.".to_string()
                     })?;
-                ("Daily Challenge Leaderboard — Full", rows, false, true)
+                ("Daily Challenge Leaderboard — Full", rows, false, true, Some(d))
             }
             "leaderboard_challenge_permanent" => {
                 let rows = db
@@ -254,6 +264,7 @@ impl Handler {
                     rows,
                     true,
                     true,
+                    None,
                 )
             }
             _ => return Err("Unknown leaderboard command.".to_string()),
@@ -263,7 +274,7 @@ impl Handler {
             return Err("No scores to display.".to_string());
         }
 
-        Ok(build_full_embed(title, &rows, is_permanent, is_challenge))
+        Ok(build_full_embed(title, &rows, is_permanent, is_challenge, resolved_date))
     }
 
     /// Parse and store a single Discord message through the normal score pipeline.
@@ -524,11 +535,47 @@ impl EventHandler for Handler {
             // User-facing commands
             CreateCommand::new("today").description("Get a link to today's maptap challenge"),
             CreateCommand::new("leaderboard_daily")
-                .description("Show today's leaderboard for this server"),
+                .description("Show a day's leaderboard for this server")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "day", "Day (1–31), defaults to today (UTC)")
+                        .required(false)
+                        .min_int_value(1)
+                        .max_int_value(31),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "month", "Month (1–12), defaults to current UTC month")
+                        .required(false)
+                        .min_int_value(1)
+                        .max_int_value(12),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "year", "Year, defaults to current UTC year")
+                        .required(false)
+                        .min_int_value(2020)
+                        .max_int_value(2100),
+                ),
             CreateCommand::new("leaderboard_permanent")
                 .description("Show the all-time average leaderboard for this server"),
             CreateCommand::new("leaderboard_challenge_daily")
-                .description("Show today's challenge leaderboard for this server"),
+                .description("Show a day's challenge leaderboard for this server")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "day", "Day (1–31), defaults to today (UTC)")
+                        .required(false)
+                        .min_int_value(1)
+                        .max_int_value(31),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "month", "Month (1–12), defaults to current UTC month")
+                        .required(false)
+                        .min_int_value(1)
+                        .max_int_value(12),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "year", "Year, defaults to current UTC year")
+                        .required(false)
+                        .min_int_value(2020)
+                        .max_int_value(2100),
+                ),
             CreateCommand::new("leaderboard_challenge_permanent")
                 .description("Show the all-time challenge leaderboard for this server"),
             CreateCommand::new("help").description("Show available commands"),
@@ -585,7 +632,61 @@ impl EventHandler for Handler {
                             return;
                         };
 
-                        let embed = match self.build_leaderboard_embed(name, gid) {
+                        // Resolve optional date params for daily commands.
+                        let is_daily = name == "leaderboard_daily" || name == "leaderboard_challenge_daily";
+                        let resolved_date: Option<NaiveDate> = if is_daily {
+                            let options = cmd.data.options();
+                            let get_int = |key: &str| -> Option<i64> {
+                                options.iter().find_map(|o| {
+                                    if o.name == key {
+                                        if let ResolvedValue::Integer(i) = o.value {
+                                            return Some(i);
+                                        }
+                                    }
+                                    None
+                                })
+                            };
+                            let now = Utc::now().date_naive();
+                            let day   = get_int("day")   .unwrap_or(now.day()   as i64) as u32;
+                            let month = get_int("month") .unwrap_or(now.month() as i64) as u32;
+                            let year  = get_int("year")  .unwrap_or(now.year()  as i64) as i32;
+                            match NaiveDate::from_ymd_opt(year, month, day) {
+                                Some(d) if d <= now => Some(d),
+                                Some(_) => {
+                                    let _ = cmd.create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("That date is in the future.")
+                                                .ephemeral(true),
+                                        ),
+                                    ).await;
+                                    return;
+                                }
+                                None => {
+                                    let _ = cmd.create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("Invalid date — check your day/month/year values.")
+                                                .ephemeral(true),
+                                        ),
+                                    ).await;
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Encode the resolved date (or today) into the button ID so that the
+                        // "Full leaderboard" button shows the same day's data.
+                        let date_str_for_button = resolved_date
+                            .unwrap_or_else(|| Utc::now().date_naive())
+                            .format("%Y-%m-%d")
+                            .to_string();
+
+                        let embed = match self.build_leaderboard_embed(name, gid, resolved_date) {
                             Ok(e) => e,
                             Err(msg) => {
                                 // Empty state — respond ephemeral, no buttons.
@@ -637,8 +738,9 @@ impl EventHandler for Handler {
                         }
 
                         // Send ephemeral follow-up with buttons (only the invoker sees this).
+                        // The full_lb button encodes the date so the full view shows the same day.
                         let buttons = CreateActionRow::Buttons(vec![
-                            CreateButton::new(format!("full_lb:{}:{}", name, gid))
+                            CreateButton::new(format!("full_lb:{}:{}:{}", name, gid, date_str_for_button))
                                 .label("Full leaderboard")
                                 .style(ButtonStyle::Primary),
                             CreateButton::new(format!("remove_lb:{}:{}", name, gid))
@@ -704,17 +806,24 @@ impl EventHandler for Handler {
                 match custom_id.splitn(2, ":").collect::<Vec<_>>().as_slice() {
                     ["full_lb", rest] => {
                         // "Full leaderboard" button — create a thread and post the full list.
-                        let Some((cmd_name, gid_str)) = rest.split_once(':') else {
+                        // Custom ID format: "full_lb:{cmd_name}:{gid}:{date}" (date optional for compat).
+                        let Some((cmd_name, rest2)) = rest.split_once(':') else {
                             warn!("Malformed full_lb custom_id: {}", custom_id);
                             return;
                         };
+                        let (gid_str, date_str) = rest2.split_once(':').unwrap_or((rest2, ""));
                         let Ok(gid) = gid_str.parse::<u64>() else {
                             warn!("Invalid guild_id in full_lb custom_id: {}", custom_id);
                             return;
                         };
+                        let btn_date: Option<NaiveDate> = if date_str.is_empty() {
+                            None
+                        } else {
+                            NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+                        };
 
-                        // Build the full embed (re-queries the DB for fresh data).
-                        let embed = match self.build_full_leaderboard_embed(cmd_name, gid) {
+                        // Build the full embed (re-queries the DB for the same date).
+                        let embed = match self.build_full_leaderboard_embed(cmd_name, gid, btn_date) {
                             Ok(e) => e,
                             Err(msg) => {
                                 let ack = CreateInteractionResponse::UpdateMessage(
@@ -754,8 +863,9 @@ impl EventHandler for Handler {
                             .unwrap_or(false);
 
                         // Replace the old 2-button ephemeral with a 3-button version.
+                        // Carry the date forward so the button continues to show the same day.
                         let three_buttons = CreateActionRow::Buttons(vec![
-                            CreateButton::new(format!("full_lb:{}:{}", cmd_name, gid))
+                            CreateButton::new(format!("full_lb:{}:{}:{}", cmd_name, gid, date_str))
                                 .label("Full leaderboard")
                                 .style(ButtonStyle::Primary),
                             CreateButton::new(format!("remove_lb:{}:{}", cmd_name, gid))
