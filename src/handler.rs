@@ -22,6 +22,21 @@ use crate::models::GameMode;
 use crate::parser::{parse_challenge_message, parse_maptap_message};
 use crate::help::build_help_text;
 
+/// Parse a user-supplied date string into a `NaiveDate`, filling missing parts from `today`.
+///
+/// Accepted formats: `"DD"`, `"DD-MM"`, `"DD-MM-YYYY"`.
+/// Returns `None` on unrecognised input or an invalid calendar date.
+fn parse_date_str(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let parts: Vec<&str> = s.split('-').collect();
+    let (day, month, year) = match parts.as_slice() {
+        [d] => (d.parse::<u32>().ok()?, today.month(), today.year()),
+        [d, m] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, today.year()),
+        [d, m, y] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, y.parse::<i32>().ok()?),
+        _ => return None,
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
 pub struct Handler {
     db: std::sync::Mutex<Database>,
     /// Tracks the last posted leaderboard message per (guild_id, command_name).
@@ -538,44 +553,18 @@ impl EventHandler for Handler {
             CreateCommand::new("leaderboard_daily")
                 .description("Show a day's leaderboard for this server")
                 .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "day", "Day (1–31), defaults to today (UTC)")
-                        .required(false)
-                        .min_int_value(1)
-                        .max_int_value(31),
-                )
-                .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "month", "Month (1–12), defaults to current UTC month")
-                        .required(false)
-                        .min_int_value(1)
-                        .max_int_value(12),
-                )
-                .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "year", "Year, defaults to current UTC year")
-                        .required(false)
-                        .min_int_value(2020)
-                        .max_int_value(2100),
+                    CreateCommandOption::new(CommandOptionType::String, "date",
+                        "DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, tomorrow/tmro/t — defaults to today")
+                        .required(false),
                 ),
             CreateCommand::new("leaderboard_permanent")
                 .description("Show the all-time average leaderboard for this server"),
             CreateCommand::new("leaderboard_challenge_daily")
                 .description("Show a day's challenge leaderboard for this server")
                 .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "day", "Day (1–31), defaults to today (UTC)")
-                        .required(false)
-                        .min_int_value(1)
-                        .max_int_value(31),
-                )
-                .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "month", "Month (1–12), defaults to current UTC month")
-                        .required(false)
-                        .min_int_value(1)
-                        .max_int_value(12),
-                )
-                .add_option(
-                    CreateCommandOption::new(CommandOptionType::Integer, "year", "Year, defaults to current UTC year")
-                        .required(false)
-                        .min_int_value(2020)
-                        .max_int_value(2100),
+                    CreateCommandOption::new(CommandOptionType::String, "date",
+                        "DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, tomorrow/tmro/t — defaults to today")
+                        .required(false),
                 ),
             CreateCommand::new("leaderboard_challenge_permanent")
                 .description("Show the all-time challenge leaderboard for this server"),
@@ -633,50 +622,51 @@ impl EventHandler for Handler {
                             return;
                         };
 
-                        // Resolve optional date params for daily commands.
+                        // Resolve optional date param for daily commands.
                         let is_daily = name == "leaderboard_daily" || name == "leaderboard_challenge_daily";
                         let resolved_date: Option<NaiveDate> = if is_daily {
                             let options = cmd.data.options();
-                            let get_int = |key: &str| -> Option<i64> {
-                                options.iter().find_map(|o| {
-                                    if o.name == key {
-                                        if let ResolvedValue::Integer(i) = o.value {
-                                            return Some(i);
-                                        }
+                            let raw_date = options.iter().find_map(|o| {
+                                if o.name == "date" {
+                                    if let ResolvedValue::String(s) = o.value {
+                                        return Some(s);
                                     }
-                                    None
-                                })
+                                }
+                                None
+                            });
+                            let today = Utc::now().date_naive();
+                            let date = match raw_date {
+                                None => today,
+                                Some("yesterday" | "yest" | "y") => today - chrono::Duration::days(1),
+                                Some("tomorrow" | "tmro" | "t") => today + chrono::Duration::days(1),
+                                Some(s) => match parse_date_str(s, today) {
+                                    Some(d) => d,
+                                    None => {
+                                        let _ = cmd.create_response(
+                                            &ctx.http,
+                                            CreateInteractionResponse::Message(
+                                                CreateInteractionResponseMessage::new()
+                                                    .content("Unrecognised date format. Try DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, or tomorrow/tmro/t.")
+                                                    .ephemeral(true),
+                                            ),
+                                        ).await;
+                                        return;
+                                    }
+                                },
                             };
-                            let now = Utc::now().date_naive();
-                            let day   = get_int("day")   .unwrap_or(now.day()   as i64) as u32;
-                            let month = get_int("month") .unwrap_or(now.month() as i64) as u32;
-                            let year  = get_int("year")  .unwrap_or(now.year()  as i64) as i32;
-                            let max_date = now + chrono::Duration::weeks(1);
-                            match NaiveDate::from_ymd_opt(year, month, day) {
-                                Some(d) if d <= max_date => Some(d),
-                                Some(_) => {
-                                    let _ = cmd.create_response(
-                                        &ctx.http,
-                                        CreateInteractionResponse::Message(
-                                            CreateInteractionResponseMessage::new()
-                                                .content("That date is more than a week away.")
-                                                .ephemeral(true),
-                                        ),
-                                    ).await;
-                                    return;
-                                }
-                                None => {
-                                    let _ = cmd.create_response(
-                                        &ctx.http,
-                                        CreateInteractionResponse::Message(
-                                            CreateInteractionResponseMessage::new()
-                                                .content("Invalid date — check your day/month/year values.")
-                                                .ephemeral(true),
-                                        ),
-                                    ).await;
-                                    return;
-                                }
+                            let max_date = today + chrono::Duration::weeks(1);
+                            if date > max_date {
+                                let _ = cmd.create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content("That date is too far in the future.")
+                                            .ephemeral(true),
+                                    ),
+                                ).await;
+                                return;
                             }
+                            Some(date)
                         } else {
                             None
                         };
