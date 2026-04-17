@@ -60,7 +60,7 @@ async fn main() {
     }
 
     // Parse optional admin guild ID for guild-specific admin commands.
-    let admin_guild_id: Option<u64> = std::env::var("ADMIN_GUILD")
+    let admin_guild_id: Option<u64> = std::env::var("ADMIN_GUILD_ID")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| s.trim().parse::<u64>().ok());
@@ -68,7 +68,7 @@ async fn main() {
     if let Some(gid) = admin_guild_id {
         info!("Admin guild: {}", gid);
     } else {
-        info!("No ADMIN_GUILD set — admin-only commands will not be registered");
+        info!("No ADMIN_GUILD_ID set — admin-only commands will not be registered");
     }
 
     let intents = GatewayIntents::GUILD_MESSAGES
