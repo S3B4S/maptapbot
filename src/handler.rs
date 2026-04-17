@@ -41,6 +41,9 @@ pub struct Handler {
     /// Optional guild ID where admin-only commands (e.g. /backup) are registered.
     /// When set, these commands are guild-specific and invisible to other servers.
     admin_guild_id: Option<u64>,
+    /// Optional channel ID (within the admin guild) where the bot writes log messages.
+    /// Requires `DISCORD_ADMIN_GUILD_ID` to be set. When `None`, logging is suppressed.
+    logging_channel_id: Option<u64>,
     /// Path to the SQLite database file, used for deriving backup paths.
     db_path: String,
 }
@@ -59,6 +62,7 @@ impl Handler {
         channel_ids: Option<Vec<u64>>,
         admin_ids: Vec<u64>,
         admin_guild_id: Option<u64>,
+        logging_channel_id: Option<u64>,
         db_path: String,
     ) -> Self {
         Self {
@@ -68,6 +72,7 @@ impl Handler {
             channel_ids,
             admin_ids,
             admin_guild_id,
+            logging_channel_id,
             db_path,
         }
     }
@@ -530,6 +535,12 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
+
+        // Send message to discord logging channel if it exists stating it's ready to go
+        if let Some(channel_id) = self.logging_channel_id {
+            let _ = ChannelId::new(channel_id)
+                .send_message(&ctx.http, CreateMessage::new().content("Ready to go!")).await;
+        }
 
         let commands = vec![
             // User-facing commands

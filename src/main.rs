@@ -71,12 +71,18 @@ async fn main() {
         info!("No DISCORD_ADMIN_GUILD_ID set — admin-only commands will not be registered");
     }
 
+    // Parse optional logging channel ID to log to on discord.
+    let logging_channel_id = std::env::var("DISCORD_LOGGING_CHANNEL_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, db_path))
+        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path))
         .await
         .expect("Failed to create Discord client");
 
