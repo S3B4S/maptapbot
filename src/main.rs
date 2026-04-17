@@ -26,7 +26,7 @@ async fn main() {
     info!("Database initialized at {}", db_path);
 
     // Parse optional comma-separated channel ID allowlist.
-    let channel_ids: Option<Vec<u64>> = std::env::var("DISCORD_CHANNEL_IDS")
+    let channel_ids: Option<Vec<u64>> = std::env::var("DISCORD_FILTER_CHANNEL_IDS")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(|s| {
