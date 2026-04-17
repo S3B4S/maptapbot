@@ -43,7 +43,7 @@ async fn main() {
     }
 
     // Parse optional comma-separated admin user IDs.
-    let admin_ids: Vec<u64> = std::env::var("ADMIN_IDS")
+    let admin_ids: Vec<u64> = std::env::var("DISCORD_ADMIN_USER_IDS")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(|s| {
@@ -54,13 +54,13 @@ async fn main() {
         .unwrap_or_default();
 
     if admin_ids.is_empty() {
-        info!("No admin IDs configured");
+        info!("No DISCORD_ADMIN_USER_IDS configured");
     } else {
         info!("Admin IDs: {:?}", admin_ids);
     }
 
     // Parse optional admin guild ID for guild-specific admin commands.
-    let admin_guild_id: Option<u64> = std::env::var("ADMIN_GUILD_ID")
+    let admin_guild_id: Option<u64> = std::env::var("DISCORD_ADMIN_GUILD_ID")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| s.trim().parse::<u64>().ok());
@@ -68,7 +68,7 @@ async fn main() {
     if let Some(gid) = admin_guild_id {
         info!("Admin guild: {}", gid);
     } else {
-        info!("No ADMIN_GUILD_ID set — admin-only commands will not be registered");
+        info!("No DISCORD_ADMIN_GUILD_ID set — admin-only commands will not be registered");
     }
 
     let intents = GatewayIntents::GUILD_MESSAGES
