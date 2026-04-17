@@ -447,8 +447,7 @@ impl EventHandler for Handler {
             None => {} // Not a maptap message, ignore silently
             Some(Err(e)) => {
                 warn!("Invalid maptap message from {}: {}", msg.author.name, e);
-                let reply = format!("Invalid maptap score: {}", e);
-                let _ = msg.reply(&ctx.http, reply).await;
+                let _ = msg.react(&ctx.http, '❌').await;
             }
             Some(Ok((_, final_score, mode, score_date))) => {
                 // Check if this user is on the hit list and suspiciously good.
