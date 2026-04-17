@@ -556,23 +556,22 @@ impl EventHandler for Handler {
             CreateCommand::new("help").description("Show available commands"),
         ];
 
-        if let Err(e) =
-            serenity::model::application::Command::set_global_commands(&ctx.http, commands).await
-        {
+        match serenity::model::application::Command::set_global_commands(&ctx.http, commands).await
+        { Err(e) => {
             error!("Failed to register slash commands: {}", e);
-        } else {
+        } _ => {
             info!("Slash commands registered");
-        }
+        }}
 
         // Register admin-only commands as guild-specific on ADMIN_GUILD.
         if let Some(gid) = self.admin_guild_id {
             let guild_id = GuildId::new(gid);
             let admin_commands = admin_commands();
-            if let Err(e) = guild_id.set_commands(&ctx.http, admin_commands).await {
+            match guild_id.set_commands(&ctx.http, admin_commands).await { Err(e) => {
                 error!("Failed to register admin guild commands on {}: {}", gid, e);
-            } else {
+            } _ => {
                 info!("Admin guild commands registered on {}", gid);
-            }
+            }}
         }
     }
 
