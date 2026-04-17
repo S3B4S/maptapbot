@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serenity::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
@@ -19,23 +19,8 @@ use crate::db::{Database};
 use crate::embed::{build_full_embed, build_summary_embed};
 use crate::formatting::{daily_position_reactions, leaderboard_title};
 use crate::models::GameMode;
-use crate::parser::{parse_challenge_message, parse_maptap_message};
+use crate::parser::{parse_challenge_message, parse_date_str, parse_maptap_message};
 use crate::help::build_help_text;
-
-/// Parse a user-supplied date string into a `NaiveDate`, filling missing parts from `today`.
-///
-/// Accepted formats: `"DD"`, `"DD-MM"`, `"DD-MM-YYYY"`.
-/// Returns `None` on unrecognised input or an invalid calendar date.
-fn parse_date_str(s: &str, today: NaiveDate) -> Option<NaiveDate> {
-    let parts: Vec<&str> = s.split('-').collect();
-    let (day, month, year) = match parts.as_slice() {
-        [d] => (d.parse::<u32>().ok()?, today.month(), today.year()),
-        [d, m] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, today.year()),
-        [d, m, y] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, y.parse::<i32>().ok()?),
-        _ => return None,
-    };
-    NaiveDate::from_ymd_opt(year, month, day)
-}
 
 pub struct Handler {
     db: std::sync::Mutex<Database>,

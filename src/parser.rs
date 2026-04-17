@@ -400,6 +400,21 @@ fn parse_scores_line(line: &str) -> Result<[Option<u32>; 5], String> {
     Ok([scores[0], scores[1], scores[2], scores[3], scores[4]])
 }
 
+/// Parse a user-supplied date string into a `NaiveDate`, filling missing parts from `today`.
+///
+/// Accepted formats: `"DD"`, `"DD-MM"`, `"DD-MM-YYYY"`.
+/// Returns `None` on unrecognised input or an invalid calendar date.
+pub fn parse_date_str(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let parts: Vec<&str> = s.split('-').collect();
+    let (day, month, year) = match parts.as_slice() {
+        [d] => (d.parse::<u32>().ok()?, today.month(), today.year()),
+        [d, m] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, today.year()),
+        [d, m, y] => (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?, y.parse::<i32>().ok()?),
+        _ => return None,
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
 fn parse_final_score(line: &str) -> Result<u32, String> {
     // Must start with "Final score:" (case-insensitive on Score)
     // Trailing text after the number is allowed: "Final score: 823 this is amazing"
