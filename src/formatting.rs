@@ -35,6 +35,14 @@ pub fn daily_position_reactions(pos: usize) -> Vec<serenity::model::channel::Rea
     }
 }
 
+/// Generate a Discord deep-link to a specific message.
+pub fn discord_message_link(guild_id: &str, channel_id: &str, message_id: &str) -> String {
+    format!(
+        "https://discord.com/channels/{}/{}/{}",
+        guild_id, channel_id, message_id
+    )
+}
+
 /// Human-readable title for a leaderboard command.
 pub fn leaderboard_title(name: &str) -> &'static str {
     match name {

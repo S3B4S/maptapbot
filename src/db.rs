@@ -626,6 +626,42 @@ impl Database {
     /// Hard-delete a score entry by message_id. Returns the number of rows deleted (0 or 1).
     /// Prefer `invalidate_score` for normal "this score shouldn't count" operations —
     /// hard delete loses the row entirely and is irreversible.
+    /// Fetch a single score row by message_id (includes invalid rows).
+    pub fn get_score(&self, message_id: &str) -> Result<Option<ScoreRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.message_id, s.channel_id, s.channel_parent_id,
+                    s.user_id, COALESCE(u.username, s.user_id) as username,
+                    s.guild_id, s.date, s.mode,
+                    s.score1, s.score2, s.score3, s.score4, s.score5,
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
+             FROM scores s
+             LEFT JOIN users u ON s.user_id = u.user_id
+             WHERE s.message_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![message_id], |row| {
+            Ok(ScoreRow {
+                message_id: row.get(0)?,
+                channel_id: row.get(1)?,
+                channel_parent_id: row.get(2)?,
+                user_id: row.get(3)?,
+                username: row.get(4)?,
+                guild_id: row.get(5)?,
+                date: row.get(6)?,
+                mode: row.get(7)?,
+                score1: row.get(8)?,
+                score2: row.get(9)?,
+                score3: row.get(10)?,
+                score4: row.get(11)?,
+                score5: row.get(12)?,
+                final_score: row.get(13)?,
+                time_spent_ms: row.get(14)?,
+                posted_at: row.get(15)?,
+                invalid: row.get::<_, i64>(16)? != 0,
+            })
+        })?;
+        rows.next().transpose()
+    }
+
     pub fn delete_score(&self, message_id: &str) -> Result<usize, rusqlite::Error> {
         let deleted = self.conn.execute(
             "DELETE FROM scores WHERE message_id = ?1",

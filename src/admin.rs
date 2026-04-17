@@ -1,8 +1,21 @@
 use serenity::all::{CommandOptionType, CreateCommand, CreateCommandOption};
 
-use crate::db::{Database, DbStats, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot};
-use crate::discord_command_options::{message_id_option, user_id_option};
-use crate::formatting::truncate_username;
+use crate::db::{Database, DbStats, ScoreRow, StatsDelta, StatsSnapshot};
+use crate::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option, user_id_option};
+use crate::formatting::{discord_message_link, truncate_username};
+
+/// Format a one-line score summary + optional Discord message link for admin confirmations.
+fn format_score_detail(row: &ScoreRow) -> String {
+    let mut out = format!(
+        "User: {} | Date: {} | Mode: {} | Score: {}",
+        row.username, row.date, row.mode, row.final_score
+    );
+    if let (Some(guild_id), Some(channel_id)) = (&row.guild_id, &row.channel_id) {
+        out.push('\n');
+        out.push_str(&discord_message_link(guild_id, channel_id, &row.message_id));
+    }
+    out
+}
 
 /// Format score rows into a code-block table, truncated to Discord's message limit.
 /// Shows posted_at and an "INV" marker for invalidated rows so admins can see history.
@@ -192,9 +205,14 @@ pub fn handle_admin_cmd(
             let Some(message_id) = get_str("message_id") else {
                 return "Missing required parameter: message_id".to_string();
             };
+            let detail = db.get_score(message_id)
+                .ok()
+                .flatten()
+                .map(|row| format!("\n{}", format_score_detail(&row)))
+                .unwrap_or_default();
             match db.delete_score(message_id) {
                 Ok(0) => format!("No score found for message_id `{}`.", message_id),
-                Ok(n) => format!("Deleted {} score(s) for message_id `{}`.", n, message_id),
+                Ok(n) => format!("Deleted {} score(s) for message_id `{}`.{}", n, message_id, detail),
                 Err(e) => format!("DB error: {}", e),
             }
         }
@@ -202,12 +220,17 @@ pub fn handle_admin_cmd(
             let Some(message_id) = get_str("message_id") else {
                 return "Missing required parameter: message_id".to_string();
             };
+            let detail = db.get_score(message_id)
+                .ok()
+                .flatten()
+                .map(|row| format!("\n{}", format_score_detail(&row)))
+                .unwrap_or_default();
             match db.invalidate_score(message_id) {
                 Ok(0) => format!("No score found for message_id `{}`.", message_id),
                 Ok(n) => format!(
                     "Marked {} score(s) as invalid for message_id `{}`. \
-                        The prior valid score (if any) is now effective.",
-                    n, message_id
+                        The prior valid score (if any) is now effective.{}",
+                    n, message_id, detail
                 ),
                 Err(e) => format!("DB error: {}", e),
             }
@@ -351,20 +374,22 @@ pub fn admin_commands() -> Vec<CreateCommand> {
     vec![
         CreateCommand::new("delete_score")
             .description("Delete a specific score entry")
-            .add_option(message_id_option()),
+            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
         CreateCommand::new("list_scores")
             .description("Show all scores for a given user")
-            .add_option(user_id_option(true)),
+            .add_option(user_id_option(DiscordCommandOption::IsRequired)),
         CreateCommand::new("list_all_scores")
             .description("Dump all scores in the database"),
-        CreateCommand::new("list_users").description("List all known users"),
+        CreateCommand::new("list_users")
+            .description("List all known users"),
         CreateCommand::new("raw_score")
             .description("Show the raw stored message for a score entry")
-            .add_option(message_id_option()),
+            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
         CreateCommand::new("invalidate_score")
             .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
-            .add_option(message_id_option()),
-        CreateCommand::new("stats").description("Show aggregate DB stats"),
+            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
+        CreateCommand::new("stats")
+            .description("Show aggregate DB stats"),
         CreateCommand::new("backup")
             .description("Create a timestamped backup of the database"),
         CreateCommand::new("hit_list")
@@ -380,24 +405,10 @@ pub fn admin_commands() -> Vec<CreateCommand> {
                 .add_string_choice("delete", "delete")
                 .required(true),
             )
-            .add_option(user_id_option(false)),
+            .add_option(user_id_option(DiscordCommandOption::IsOptional)),
         CreateCommand::new("parse")
             .description("Re-process an existing Discord message through the score pipeline")
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::String,
-                    "channel_id",
-                    "Discord channel ID where the message lives",
-                )
-                .required(true),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::String,
-                    "message_id",
-                    "Discord message ID to parse",
-                )
-                .required(true),
-            ),
+            .add_option(channel_id_option(DiscordCommandOption::IsRequired))
+            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
     ]
 }
