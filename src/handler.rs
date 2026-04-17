@@ -23,7 +23,7 @@ use crate::parser::{parse_challenge_message, parse_date_str, parse_maptap_messag
 use crate::help::build_help_text;
 
 pub struct Handler {
-    db: std::sync::Mutex<Database>,
+    pub(crate) db: std::sync::Mutex<Database>,
     /// Tracks the last posted leaderboard message per (guild_id, command_name).
     /// Stores (channel_id, message_id, invoker_user_id) so the button handler
     /// can verify who invoked the command and find the message to delete.
@@ -46,6 +46,8 @@ pub struct Handler {
     logging_channel_id: Option<u64>,
     /// Path to the SQLite database file, used for deriving backup paths.
     db_path: String,
+    /// PostgreSQL connection URL for /sync_to_postgres. None if unconfigured.
+    pub(crate) pg_url: Option<String>,
 }
 
 fn handle_today_cmd() -> CreateInteractionResponse {
@@ -64,6 +66,7 @@ impl Handler {
         admin_guild_id: Option<u64>,
         logging_channel_id: Option<u64>,
         db_path: String,
+        pg_url: Option<String>,
     ) -> Self {
         Self {
             db: std::sync::Mutex::new(db),
@@ -74,6 +77,7 @@ impl Handler {
             admin_guild_id,
             logging_channel_id,
             db_path,
+            pg_url,
         }
     }
 
@@ -783,6 +787,7 @@ impl EventHandler for Handler {
                         }
                     }
                     "parse" => self.handle_parse_cmd(&ctx, &cmd).await,
+                    "sync_to_postgres" => self.handle_sync_to_postgres_cmd(&ctx, &cmd).await,
                     _ => {}
                 }
             }

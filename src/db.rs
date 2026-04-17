@@ -80,7 +80,7 @@ pub struct StatsDelta {
 }
 
 pub struct Database {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Database {

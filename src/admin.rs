@@ -410,5 +410,7 @@ pub fn admin_commands() -> Vec<CreateCommand> {
             .description("Re-process an existing Discord message through the score pipeline")
             .add_option(channel_id_option(DiscordCommandOption::IsRequired))
             .add_option(message_id_option(DiscordCommandOption::IsRequired)),
+        CreateCommand::new("sync_to_postgres")
+            .description("Copy all SQLite data to PostgreSQL (SQLite wins on conflicts)"),
     ]
 }

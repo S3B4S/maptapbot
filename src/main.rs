@@ -8,6 +8,8 @@ mod help;
 mod embed;
 mod discord_command_options;
 mod handler_parse;
+mod pg_db;
+mod handler_pg_sync;
 
 use handler::Handler;
 use serenity::prelude::*;
@@ -77,12 +79,21 @@ async fn main() {
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| s.trim().parse::<u64>().ok());
 
+    let pg_url: Option<String> = std::env::var("POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if pg_url.is_some() {
+        info!("POSTGRES_URL configured — /sync_to_postgres available");
+    } else {
+        info!("No POSTGRES_URL set — /sync_to_postgres will be unavailable");
+    }
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path))
+        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path, pg_url))
         .await
         .expect("Failed to create Discord client");
 
