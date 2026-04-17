@@ -357,22 +357,22 @@ impl EventHandler for Handler {
                 let parent_allowed = 'parent: {
                     // Try cache first (no API call).
                     // Threads live in guild.threads (Vec), not guild.channels (HashMap).
-                    if let Some(guild_id) = msg.guild_id {
-                        if let Some(guild) = ctx.cache.guild(guild_id) {
-                            let cached = guild
-                                .channels
-                                .get(&msg.channel_id)
-                                .or_else(|| {
-                                    guild
-                                        .threads
-                                        .iter()
-                                        .find(|t| t.id == msg.channel_id)
-                                });
-                            if let Some(channel) = cached {
-                                break 'parent channel
-                                    .parent_id
-                                    .map_or(false, |pid| ids.contains(&pid.get()));
-                            }
+                    if  let Some(guild_id) = msg.guild_id
+                        && let Some(guild) = ctx.cache.guild(guild_id) 
+                    {
+                        let cached = guild
+                            .channels
+                            .get(&msg.channel_id)
+                            .or_else(|| {
+                                guild
+                                    .threads
+                                    .iter()
+                                    .find(|t| t.id == msg.channel_id)
+                            });
+                        if let Some(channel) = cached {
+                            break 'parent channel
+                                .parent_id
+                                .map_or(false, |pid| ids.contains(&pid.get()));
                         }
                     }
                     // Fallback: fetch from Discord API.
