@@ -79,7 +79,7 @@ These apply to all modes:
 | Scenario | Bot action |
 |---|---|
 | Message contains no recognizable maptap block | Silent — no reply, no reaction |
-| Maptap block found but validation fails | Replies: `"Invalid maptap score: <reason>"` |
+| Maptap block found but validation fails | Reacts with ❌ emoji; no reply |
 | Valid score but DB save fails | Replies: `"Internal error saving your score."` |
 | Valid score saved successfully | Reacts with 🗺️ emoji, no reply |
 

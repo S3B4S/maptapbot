@@ -18,7 +18,7 @@ Response is always ephemeral.
 ## Behaviour
 
 1. Fetch the specified message from Discord via the REST API.
-2. Apply the channel allowlist check (same as live message processing). If `DISCORD_CHANNEL_IDS` is set and the channel is not in the allowlist (and not a thread of an allowed parent), the command is rejected.
+2. Apply the channel allowlist check (same as live message processing). If `DISCORD_FILTER_CHANNEL_IDS` is set and the channel is not in the allowlist (and not a thread of an allowed parent), the command is rejected.
 3. Run the message content through the standard parsers (`parse_maptap_message`, then `parse_challenge_message`).
 4. If a valid score is found, upsert it into the database exactly as a live message would be — subject to the same `UNIQUE(user_id, guild_id, date, mode)` constraint, meaning the new entry replaces any existing one for the same user/guild/date/mode combination.
 5. Reply with the outcome.
@@ -48,4 +48,4 @@ There is no priority flag, no timestamp override, and no way to bypass any guard
 
 ## Access
 
-Admin-only. Registered as a guild-specific slash command on `ADMIN_GUILD`. See [admin.md](./admin.md) for how admin access is configured.
+Admin-only. Registered as a guild-specific slash command on the guild set by `DISCORD_ADMIN_GUILD_ID`. See [admin.md](./admin.md) for how admin access is configured.

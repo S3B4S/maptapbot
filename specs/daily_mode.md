@@ -33,7 +33,7 @@ The `scores` table `mode` column value for this mode is `daily_default`.
 /leaderboard_daily
 ```
 
-Shows today's scores only, scoped to the current guild. Sorted descendingly by total score. Empty state: `"No scores recorded for today yet!"`
+Shows today's scores only (or the date specified via the `date` parameter), scoped to the current guild. Sorted descendingly by total score. Empty state: `"No scores recorded for that day yet!"`
 
 ```
 /leaderboard_permanent
