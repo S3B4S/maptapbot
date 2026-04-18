@@ -621,6 +621,90 @@ impl Database {
         rows.collect()
     }
 
+    /// Weekly leaderboard (default mode): aggregate each user's effective
+    /// (latest-valid-per-day) final scores across a date range, sorted by
+    /// aggregate final_score desc.
+    ///
+    /// `week_start` and `week_end` are "YYYY-MM-DD" strings (Monday and Sunday,
+    /// or today for the current in-progress week).
+    /// `use_sum` selects SUM aggregation; `false` uses AVG.
+    pub fn get_weekly_leaderboard(
+        &self,
+        guild_id: u64,
+        week_start: &str,
+        week_end: &str,
+        use_sum: bool,
+    ) -> Result<Vec<LeaderboardRow>, rusqlite::Error> {
+        let sql_sum = "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.date >= ?2
+                  AND s.date <= ?3
+                  AND s.mode = 'daily_default'
+             )
+             SELECT e.user_id,
+                    u.username,
+                    SUM(e.score1)       as agg_s1,
+                    SUM(e.score2)       as agg_s2,
+                    SUM(e.score3)       as agg_s3,
+                    SUM(e.score4)       as agg_s4,
+                    SUM(e.score5)       as agg_s5,
+                    SUM(e.final_score)  as agg_final
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             GROUP BY e.user_id
+             ORDER BY agg_final DESC";
+        let sql_avg = "WITH effective AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id, date, mode
+                    ORDER BY posted_at DESC, message_id DESC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.date >= ?2
+                  AND s.date <= ?3
+                  AND s.mode = 'daily_default'
+             )
+             SELECT e.user_id,
+                    u.username,
+                    AVG(e.score1)       as agg_s1,
+                    AVG(e.score2)       as agg_s2,
+                    AVG(e.score3)       as agg_s3,
+                    AVG(e.score4)       as agg_s4,
+                    AVG(e.score5)       as agg_s5,
+                    AVG(e.final_score)  as agg_final
+             FROM effective e
+             JOIN users u ON e.user_id = u.user_id
+             WHERE e.rn = 1
+             GROUP BY e.user_id
+             ORDER BY agg_final DESC";
+        let mut stmt = self.conn.prepare(if use_sum { sql_sum } else { sql_avg })?;
+        let rows = stmt.query_map(
+            params![guild_id.to_string(), week_start, week_end],
+            |row| {
+                Ok(LeaderboardRow {
+                    user_id: row.get(0)?,
+                    username: row.get(1)?,
+                    score1: row.get::<_, Option<f64>>(2)?,
+                    score2: row.get::<_, Option<f64>>(3)?,
+                    score3: row.get::<_, Option<f64>>(4)?,
+                    score4: row.get::<_, Option<f64>>(5)?,
+                    score5: row.get::<_, Option<f64>>(6)?,
+                    final_score: row.get(7)?,
+                    time_spent_ms: None,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
     // ── Admin query methods ──────────────────────────────────────────────
 
     /// Hard-delete a score entry by message_id. Returns the number of rows deleted (0 or 1).

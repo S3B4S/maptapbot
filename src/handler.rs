@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serenity::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateEmbed,
@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::admin::{admin_commands, handle_admin_cmd};
 use crate::db::{Database};
-use crate::embed::{build_full_embed, build_summary_embed};
+use crate::embed::{build_full_embed, build_summary_embed, build_weekly_full_embed, build_weekly_summary_embed};
 use crate::formatting::{daily_position_reactions, leaderboard_title};
 use crate::models::GameMode;
 use crate::parser::{parse_challenge_message, parse_date_str, parse_maptap_message};
@@ -135,6 +135,76 @@ impl Handler {
             .lock()
             .ok()?
             .remove(&(guild_id, cmd))
+    }
+
+    /// Build the weekly leaderboard summary embed.
+    fn build_weekly_leaderboard_embed(
+        &self,
+        gid: u64,
+        week_start: NaiveDate,
+        week_end: NaiveDate,
+        week_year: i32,
+        week_num: u32,
+        is_current_week: bool,
+        use_sum: bool,
+    ) -> Result<CreateEmbed, String> {
+        let db = self.db.lock().unwrap();
+        let week_start_str = week_start.format("%Y-%m-%d").to_string();
+        let week_end_str = week_end.format("%Y-%m-%d").to_string();
+        db.get_weekly_leaderboard(gid, &week_start_str, &week_end_str, use_sum)
+            .map_err(|e| {
+                error!("DB error: {}", e);
+                "Internal error fetching leaderboard.".to_string()
+            })
+            .and_then(|rows| {
+                if rows.is_empty() {
+                    Err("No scores recorded for that week yet!".to_string())
+                } else {
+                    let title = if use_sum {
+                        "Weekly Leaderboard (Sum)"
+                    } else {
+                        "Weekly Leaderboard"
+                    };
+                    Ok(build_weekly_summary_embed(
+                        title, &rows, week_year, week_num, week_start, week_end,
+                        is_current_week, use_sum,
+                    ))
+                }
+            })
+    }
+
+    /// Build the full weekly leaderboard embed (for the thread view).
+    fn build_full_weekly_leaderboard_embed(
+        &self,
+        gid: u64,
+        week_start: NaiveDate,
+        week_end: NaiveDate,
+        week_year: i32,
+        week_num: u32,
+        is_current_week: bool,
+        use_sum: bool,
+    ) -> Result<CreateEmbed, String> {
+        let db = self.db.lock().unwrap();
+        let week_start_str = week_start.format("%Y-%m-%d").to_string();
+        let week_end_str = week_end.format("%Y-%m-%d").to_string();
+        let rows = db
+            .get_weekly_leaderboard(gid, &week_start_str, &week_end_str, use_sum)
+            .map_err(|e| {
+                error!("DB error: {}", e);
+                "Internal error fetching leaderboard.".to_string()
+            })?;
+        if rows.is_empty() {
+            return Err("No scores to display.".to_string());
+        }
+        let title = if use_sum {
+            "Weekly Leaderboard (Sum) — Full"
+        } else {
+            "Weekly Leaderboard — Full"
+        };
+        Ok(build_weekly_full_embed(
+            title, &rows, week_year, week_num, week_start, week_end,
+            is_current_week, use_sum,
+        ))
     }
 
     /// Build the leaderboard summary embed for the given command.
@@ -556,6 +626,20 @@ impl EventHandler for Handler {
                         "DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, tomorrow/tmro/t — defaults to today")
                         .required(false),
                 ),
+            CreateCommand::new("leaderboard_weekly")
+                .description("Show a week's leaderboard for this server")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "week",
+                        "16, 16-2026, last/l — defaults to current week")
+                        .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "scoring",
+                        "How to aggregate scores across the week")
+                        .required(false)
+                        .add_string_choice("Average", "avg")
+                        .add_string_choice("Sum", "sum"),
+                ),
             CreateCommand::new("leaderboard_permanent")
                 .description("Show the all-time average leaderboard for this server"),
             CreateCommand::new("leaderboard_challenge_daily")
@@ -745,6 +829,168 @@ impl EventHandler for Handler {
                             error!("Failed to send button follow-up for /{}: {}", name, e);
                         }
                     }
+                    "leaderboard_weekly" => {
+                        let Some(gid) = guild_id else {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content("This command can only be used in a server.")
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        };
+
+                        let today = Utc::now().date_naive();
+                        let options = cmd.data.options();
+
+                        // Parse optional `week` parameter.
+                        let raw_week: Option<&str> = options.iter().find_map(|o| {
+                            if o.name == "week" {
+                                if let ResolvedValue::String(s) = o.value {
+                                    return Some(s);
+                                }
+                            }
+                            None
+                        });
+
+                        // Determine the Monday of the target ISO week.
+                        let week_monday: Option<NaiveDate> = match raw_week {
+                            None => {
+                                // Current ISO week.
+                                let iso = today.iso_week();
+                                NaiveDate::from_isoywd_opt(iso.year(), iso.week(), Weekday::Mon)
+                            }
+                            Some("last" | "l") => {
+                                let iso = today.iso_week();
+                                NaiveDate::from_isoywd_opt(iso.year(), iso.week(), Weekday::Mon)
+                                    .map(|m| m - chrono::Duration::weeks(1))
+                            }
+                            Some(s) => {
+                                // Accept "N" (week N of current ISO year) or "N-YYYY".
+                                let parsed = if let Some((n_str, y_str)) = s.split_once('-') {
+                                    let week_num = n_str.parse::<u32>().ok();
+                                    let year = y_str.parse::<i32>().ok();
+                                    week_num.zip(year).and_then(|(w, y)| {
+                                        NaiveDate::from_isoywd_opt(y, w, Weekday::Mon)
+                                    })
+                                } else {
+                                    s.parse::<u32>().ok().and_then(|w| {
+                                        NaiveDate::from_isoywd_opt(today.iso_week().year(), w, Weekday::Mon)
+                                    })
+                                };
+                                if parsed.is_none() {
+                                    let _ = cmd.create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("Unrecognised week format. Try a week number (16), N-YYYY (16-2026), or last/l.")
+                                                .ephemeral(true),
+                                        ),
+                                    ).await;
+                                    return;
+                                }
+                                parsed
+                            }
+                        };
+
+                        let Some(week_start) = week_monday else {
+                            let _ = cmd.create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Invalid week number.")
+                                        .ephemeral(true),
+                                ),
+                            ).await;
+                            return;
+                        };
+
+                        let week_sunday = week_start + chrono::Duration::days(6);
+                        let week_end = if week_sunday >= today { today } else { week_sunday };
+                        let is_current_week = week_end == today && today >= week_start && today <= week_sunday;
+                        let iso = week_start.iso_week();
+
+                        // Parse optional `scoring` parameter.
+                        let use_sum = options.iter().any(|o| {
+                            o.name == "scoring"
+                                && matches!(o.value, ResolvedValue::String("sum"))
+                        });
+                        let scoring_str = if use_sum { "sum" } else { "avg" };
+
+                        let embed = match self.build_weekly_leaderboard_embed(
+                            gid, week_start, week_end, iso.year(), iso.week(), is_current_week, use_sum,
+                        ) {
+                            Ok(e) => e,
+                            Err(msg) => {
+                                let _ = cmd.create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(msg)
+                                            .ephemeral(true),
+                                    ),
+                                ).await;
+                                return;
+                            }
+                        };
+
+                        let cmd_key = cmd_name_key("leaderboard_weekly");
+
+                        // Delete the previous leaderboard message for this command, if any.
+                        if let Some((ch_id, msg_id, _)) =
+                            self.take_prev_leaderboard_msg(gid, cmd_key)
+                        {
+                            let _ = ctx.http.delete_message(ch_id, msg_id, None).await;
+                        }
+
+                        let response = CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().embed(embed),
+                        );
+                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                            error!("Failed to respond to /leaderboard_weekly: {}", e);
+                            return;
+                        }
+
+                        match cmd.get_response(&ctx.http).await {
+                            Ok(posted) => {
+                                self.store_leaderboard_msg(
+                                    gid,
+                                    cmd_key,
+                                    posted.channel_id,
+                                    posted.id,
+                                    invoker_id,
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to retrieve response message for /leaderboard_weekly: {}", e);
+                            }
+                        }
+
+                        // Button ID encodes week_start date and scoring mode.
+                        let week_start_str = week_start.format("%Y-%m-%d").to_string();
+                        let buttons = CreateActionRow::Buttons(vec![
+                            CreateButton::new(format!(
+                                "full_lb:leaderboard_weekly:{}:{}:{}",
+                                gid, week_start_str, scoring_str
+                            ))
+                            .label("Full leaderboard")
+                            .style(ButtonStyle::Primary),
+                            CreateButton::new(format!("remove_lb:leaderboard_weekly:{}", gid))
+                                .label("Remove")
+                                .style(ButtonStyle::Danger),
+                        ]);
+                        let followup = CreateInteractionResponseFollowup::new()
+                            .content("Leaderboard actions:")
+                            .components(vec![buttons])
+                            .ephemeral(true);
+                        if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                            error!("Failed to send button follow-up for /leaderboard_weekly: {}", e);
+                        }
+                    }
                     "help" => {
                         let content = build_help_text(self.is_admin(invoker_id));
                         let response: CreateInteractionResponse = CreateInteractionResponse::Message(
@@ -813,15 +1059,44 @@ impl EventHandler for Handler {
                             NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
                         };
 
-                        // Build the full embed (re-queries the DB for the same date).
-                        let embed = match self.build_full_leaderboard_embed(cmd_name, gid, btn_date) {
-                            Ok(e) => e,
-                            Err(msg) => {
-                                let ack = CreateInteractionResponse::UpdateMessage(
-                                    CreateInteractionResponseMessage::new().content(msg),
-                                );
-                                let _ = cmd.create_response(&ctx.http, ack).await;
-                                return;
+                        // Build the full embed (re-queries the DB for the same date/week).
+                        let embed = if cmd_name == "leaderboard_weekly" {
+                            // date_str = "{week_start_YYYY-MM-DD}:{scoring}"
+                            let (ws_str, agg_str) =
+                                date_str.split_once(':').unwrap_or((date_str, "avg"));
+                            let week_start = NaiveDate::parse_from_str(ws_str, "%Y-%m-%d")
+                                .unwrap_or_else(|_| Utc::now().date_naive());
+                            let use_sum = agg_str == "sum";
+                            let today = Utc::now().date_naive();
+                            let week_sunday = week_start + chrono::Duration::days(6);
+                            let week_end = if week_sunday >= today { today } else { week_sunday };
+                            let is_current_week = week_end == today
+                                && today >= week_start
+                                && today <= week_sunday;
+                            let iso = week_start.iso_week();
+                            match self.build_full_weekly_leaderboard_embed(
+                                gid, week_start, week_end, iso.year(), iso.week(),
+                                is_current_week, use_sum,
+                            ) {
+                                Ok(e) => e,
+                                Err(msg) => {
+                                    let ack = CreateInteractionResponse::UpdateMessage(
+                                        CreateInteractionResponseMessage::new().content(msg),
+                                    );
+                                    let _ = cmd.create_response(&ctx.http, ack).await;
+                                    return;
+                                }
+                            }
+                        } else {
+                            match self.build_full_leaderboard_embed(cmd_name, gid, btn_date) {
+                                Ok(e) => e,
+                                Err(msg) => {
+                                    let ack = CreateInteractionResponse::UpdateMessage(
+                                        CreateInteractionResponseMessage::new().content(msg),
+                                    );
+                                    let _ = cmd.create_response(&ctx.http, ack).await;
+                                    return;
+                                }
                             }
                         };
 
@@ -1046,6 +1321,7 @@ fn cmd_name_key(name: &str) -> &'static str {
         "leaderboard_permanent" => "leaderboard_permanent",
         "leaderboard_challenge_daily" => "leaderboard_challenge_daily",
         "leaderboard_challenge_permanent" => "leaderboard_challenge_permanent",
+        "leaderboard_weekly" => "leaderboard_weekly",
         _ => unreachable!("cmd_name_key called with unexpected name: {}", name),
     }
 }

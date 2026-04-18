@@ -50,6 +50,7 @@ pub fn leaderboard_title(name: &str) -> &'static str {
         "leaderboard_permanent" => "Permanent Leaderboard",
         "leaderboard_challenge_daily" => "Daily Challenge Leaderboard",
         "leaderboard_challenge_permanent" => "Permanent Challenge Leaderboard",
+        "leaderboard_weekly" => "Weekly Leaderboard",
         _ => "Leaderboard",
     }
 }

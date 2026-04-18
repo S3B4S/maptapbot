@@ -130,6 +130,105 @@ pub fn build_summary_embed(
     embed
 }
 
+/// Build the embed description for a weekly leaderboard.
+fn build_weekly_description(
+    week_year: i32,
+    week_num: u32,
+    week_start: NaiveDate,
+    week_end: NaiveDate,
+    count: usize,
+    is_current_week: bool,
+) -> String {
+    let start_fmt = week_start.format("%b %-d").to_string();
+    let end_fmt = week_end.format("%b %-d").to_string();
+    let range = if is_current_week {
+        format!("{} \u{2013} {}, in progress", start_fmt, end_fmt)
+    } else {
+        format!("{} \u{2013} {}", start_fmt, end_fmt)
+    };
+    format!(
+        "Week {} of {} ({}) \u{00b7} {} players \u{00b7} https://maptap.gg",
+        week_num, week_year, range, count
+    )
+}
+
+/// Build a summary embed for the weekly leaderboard.
+pub fn build_weekly_summary_embed(
+    title: &str,
+    rows: &[LeaderboardRow],
+    week_year: i32,
+    week_num: u32,
+    week_start: NaiveDate,
+    week_end: NaiveDate,
+    is_current_week: bool,
+    use_sum: bool,
+) -> CreateEmbed {
+    // use_sum → integer formatting (like daily); avg → 1-decimal (like permanent)
+    let is_permanent = !use_sum;
+    let desc = build_weekly_description(week_year, week_num, week_start, week_end, rows.len(), is_current_week);
+    let top3 = build_top3_value(rows, false, is_permanent);
+
+    let mut embed = CreateEmbed::new()
+        .title(title)
+        .color(COLOR_GOLD)
+        .description(desc)
+        .field("Top 3", &top3, false);
+
+    if let Some(bottom) = build_bottom3_value(rows, false, is_permanent) {
+        embed = embed.field("Bottom 3", &bottom, false);
+    }
+
+    embed
+}
+
+/// Build the full-list embed for the weekly leaderboard (thread view).
+pub fn build_weekly_full_embed(
+    title: &str,
+    rows: &[LeaderboardRow],
+    week_year: i32,
+    week_num: u32,
+    week_start: NaiveDate,
+    week_end: NaiveDate,
+    is_current_week: bool,
+    use_sum: bool,
+) -> CreateEmbed {
+    let is_permanent = !use_sum;
+    let desc = build_weekly_description(week_year, week_num, week_start, week_end, rows.len(), is_current_week);
+
+    let mut lines = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let name = truncate_username(&row.username, 20);
+        let score = if is_permanent {
+            format!("{:.1}", row.final_score)
+        } else {
+            format!("{:.0}", row.final_score)
+        };
+        lines.push(format!("{}. {} \u{2014} {}", i + 1, name, score));
+    }
+
+    let mut body = String::new();
+    let suffix = "\n... (truncated)";
+    let budget = 4096 - desc.len() - 2 - suffix.len();
+    let mut truncated = false;
+    for line in &lines {
+        if body.len() + line.len() + 1 > budget {
+            body.push_str(suffix);
+            truncated = true;
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+    }
+    let _ = truncated; // suppress unused warning
+
+    CreateEmbed::new()
+        .title(title)
+        .color(COLOR_GOLD)
+        .description(format!("{}\n\n{}", desc, body))
+}
+
 /// Build the full-list embed posted into a thread.
 /// Lists every entry ranked, truncated to fit Discord's 4096-char embed description limit.
 /// `date` is the leaderboard date for daily commands; `None` for permanent or "today".
