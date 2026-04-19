@@ -21,6 +21,9 @@ use crate::formatting::{daily_position_reactions, leaderboard_title};
 use crate::models::GameMode;
 use crate::parser::{parse_challenge_message, parse_date_str, parse_maptap_message};
 use crate::help::build_help_text;
+use crate::plugin::{CommandHandler, Plugin};
+use crate::sqlite_repo::SqliteRepository;
+use crate::{sqlite_repo};
 
 pub struct Handler {
     pub(crate) db: std::sync::Mutex<Database>,
@@ -48,6 +51,10 @@ pub struct Handler {
     db_path: String,
     /// PostgreSQL connection URL for /sync_to_postgres. None if unconfigured.
     pub(crate) pg_url: Option<String>,
+
+    plugins: Vec<Box<dyn Plugin>>,
+
+    command_table: HashMap<String, CommandHandler>,
 }
 
 fn handle_today_cmd() -> CreateInteractionResponse {
@@ -67,7 +74,16 @@ impl Handler {
         logging_channel_id: Option<u64>,
         db_path: String,
         pg_url: Option<String>,
+        plugins: Vec<Box<dyn Plugin>>,
     ) -> Self {
+        // How is this becoming a HashMap
+        // Can it reverse look up or something from this being used in Self{}
+        let command_table = plugins
+            .iter()
+            .flat_map(|p| p.register_commands())
+            .map(|pc| (pc.command_name, pc.handle_interaction))
+            .collect();
+
         Self {
             db: std::sync::Mutex::new(db),
             leaderboard_msgs: std::sync::Mutex::new(HashMap::new()),
@@ -78,6 +94,8 @@ impl Handler {
             logging_channel_id,
             db_path,
             pg_url,
+            plugins,
+            command_table
         }
     }
 
@@ -610,6 +628,12 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
+        // On ready
+        let plugin_commands: Vec<CreateCommand> = self.plugins
+            .iter()
+            .flat_map(|p| p.commands())
+            .collect();
+
         // Send message to discord logging channel if it exists stating it's ready to go
         if let Some(channel_id) = self.logging_channel_id {
             let _ = ChannelId::new(channel_id)
@@ -654,7 +678,12 @@ impl EventHandler for Handler {
             CreateCommand::new("help").description("Show available commands"),
         ];
 
-        match serenity::model::application::Command::set_global_commands(&ctx.http, commands).await
+        let all_commands: Vec<CreateCommand> = commands
+            .into_iter()
+            .chain(plugin_commands)
+            .collect();
+
+        match serenity::model::application::Command::set_global_commands(&ctx.http, all_commands).await
         { Err(e) => {
             error!("Failed to register slash commands: {}", e);
         } _ => {
@@ -678,6 +707,19 @@ impl EventHandler for Handler {
             Interaction::Command(cmd) => {
                 let guild_id = cmd.guild_id.map(|g| g.get());
                 let invoker_id = cmd.user.id.get();
+                let cmd_name = &cmd.data.name.to_string();
+
+                if let Some(handler) = self.command_table.get(cmd_name) {
+                    return match handler(&ctx, &cmd, &SqliteRepository::new(&self.db)) {
+                        Ok(response) => {
+                            if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                                error!("Plugin /{} failed to respond: {}", cmd_name, e);
+                            }
+                            return;
+                        }
+                        Err(e) => error!("Plugin /{} error: {}", cmd_name, e),
+                    }
+                }
 
                 match cmd.data.name.as_str() {
                     "today" => {

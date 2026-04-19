@@ -10,10 +10,17 @@ mod discord_command_options;
 mod handler_parse;
 mod pg_db;
 mod handler_pg_sync;
+mod repository;
+mod plugin;
+mod plugins;
+mod sqlite_repo;
 
 use handler::Handler;
 use serenity::prelude::*;
 use tracing::info;
+
+use crate::plugin::Plugin;
+use crate::plugins::self_plugin::SelfPlugin;
 
 #[tokio::main]
 async fn main() {
@@ -92,8 +99,12 @@ async fn main() {
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
+    let plugins: Vec<Box<dyn Plugin>> = vec![
+        Box::new(SelfPlugin),
+    ];
+
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path, pg_url))
+        .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path, pg_url, plugins))
         .await
         .expect("Failed to create Discord client");
 
