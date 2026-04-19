@@ -23,7 +23,6 @@ use crate::parser::{parse_challenge_message, parse_date_str, parse_maptap_messag
 use crate::help::build_help_text;
 use crate::plugin::{CommandHandler, Plugin};
 use crate::sqlite_repo::SqliteRepository;
-use crate::{sqlite_repo};
 
 pub struct Handler {
     pub(crate) db: std::sync::Mutex<Database>,
