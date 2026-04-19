@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Duration, NaiveDate, Utc, Weekday};
 use serenity::all::{
     CommandInteraction, Context, CreateCommand, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter,
     CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -203,9 +203,39 @@ fn handle_interaction(_ctx: &Context, cmd: &CommandInteraction, repo: &dyn Repos
         embed = embed.field("📅 Playing since", since, true);
     }
 
-    // Server rank — only shown in guilds; would need all-user data to rank properly
-    if cmd.guild_id.is_some() {
-        embed = embed.field("🏅 Server rank", "Not ranked yet".to_string(), false);
+    // Daily and weekly rank — only available in guilds
+    if let Some(guild_id) = cmd.guild_id {
+        let gid = guild_id.get();
+        let uid_str = user.id.get().to_string();
+        let today_str = today.format("%Y-%m-%d").to_string();
+
+        // Today's daily rank
+        if let Ok(daily_lb) = repo.get_daily_leaderboard(gid, &today_str) {
+            let rank = daily_lb.iter().position(|r| r.user_id == uid_str).map(|i| i + 1);
+            let value = match rank {
+                Some(r) => format!("#{} of {}", r, daily_lb.len()),
+                None => "Not on today's board".to_string(),
+            };
+            embed = embed.field("📅 Today's rank", value, true);
+        }
+
+        // This week's rank (current ISO week, avg scoring)
+        let iso = today.iso_week();
+        if let Some(week_start) = NaiveDate::from_isoywd_opt(iso.year(), iso.week(), Weekday::Mon) {
+            let week_sunday = week_start + Duration::days(6);
+            let week_end = if week_sunday >= today { today } else { week_sunday };
+            let ws_str = week_start.format("%Y-%m-%d").to_string();
+            let we_str = week_end.format("%Y-%m-%d").to_string();
+
+            if let Ok(weekly_lb) = repo.get_weekly_leaderboard(gid, &ws_str, &we_str) {
+                let rank = weekly_lb.iter().position(|r| r.user_id == uid_str).map(|i| i + 1);
+                let value = match rank {
+                    Some(r) => format!("#{} of {}", r, weekly_lb.len()),
+                    None => "Not on this week's board".to_string(),
+                };
+                embed = embed.field("📆 This week's rank", value, true);
+            }
+        }
     }
 
     if let Some((pos, avg)) = strongest_tile {

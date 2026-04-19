@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
+use crate::db::{Database, LeaderboardRow, ScoreRow};
 use crate::repository::Repository;
-use crate::db::Database;
 
 pub struct SqliteRepository<'a> {
     db: &'a Mutex<Database>,
@@ -12,18 +12,30 @@ impl<'a> SqliteRepository<'a> {
         SqliteRepository { db }
     }
 }
+
 impl Repository for SqliteRepository<'_> {
-    fn get_scores(&self) -> Result<Vec<crate::db::ScoreRow>, String> {
+    fn get_scores(&self) -> Result<Vec<ScoreRow>, String> {
         let db = self.db.lock().unwrap();
         db.list_all_scores().map_err(|e| e.to_string())
     }
 
-    fn get_scores_today(&self) -> Result<Vec<crate::db::ScoreRow>, String> {
+    fn get_scores_today(&self) -> Result<Vec<ScoreRow>, String> {
         todo!()
     }
 
-    fn get_scores_user(&self, user_id: String) -> Result<Vec<crate::db::ScoreRow>, String> {
+    fn get_scores_user(&self, user_id: String) -> Result<Vec<ScoreRow>, String> {
         let db = self.db.lock().unwrap();
         db.list_scores(&user_id).map_err(|e| e.to_string())
+    }
+
+    fn get_daily_leaderboard(&self, guild_id: u64, date: &str) -> Result<Vec<LeaderboardRow>, String> {
+        let db = self.db.lock().unwrap();
+        db.get_daily_leaderboard(guild_id, date).map_err(|e| e.to_string())
+    }
+
+    fn get_weekly_leaderboard(&self, guild_id: u64, week_start: &str, week_end: &str) -> Result<Vec<LeaderboardRow>, String> {
+        let db = self.db.lock().unwrap();
+        // Use avg (use_sum = false) — consistent with the default /leaderboard_weekly view
+        db.get_weekly_leaderboard(guild_id, week_start, week_end, false).map_err(|e| e.to_string())
     }
 }
