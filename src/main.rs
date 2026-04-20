@@ -20,6 +20,7 @@ use serenity::prelude::*;
 use tracing::info;
 
 use crate::plugin::Plugin;
+use crate::plugins::leaderboard_plugin::LeaderboardPlugin;
 use crate::plugins::self_plugin::SelfPlugin;
 
 #[tokio::main]
@@ -101,6 +102,7 @@ async fn main() {
 
     let plugins: Vec<Box<dyn Plugin>> = vec![
         Box::new(SelfPlugin),
+        Box::new(LeaderboardPlugin::new()),
     ];
 
     let mut client = Client::builder(&token, intents)

@@ -6,11 +6,13 @@ use serenity::all::{
     CreateInteractionResponse, CreateInteractionResponseMessage,
 };
 
+use serenity::async_trait;
+
 use crate::{plugin::{Plugin, PluginCommand}, repository::Repository};
 
 pub struct SelfPlugin;
 
-fn handle_interaction(_ctx: &Context, cmd: &CommandInteraction, repo: &dyn Repository) -> Result<CreateInteractionResponse, String> {
+fn build_self_response(cmd: &CommandInteraction, repo: &dyn Repository) -> Result<CreateInteractionResponse, String> {
     let user = &cmd.user;
     let user_id_str = user.id.get().to_string();
 
@@ -227,7 +229,7 @@ fn handle_interaction(_ctx: &Context, cmd: &CommandInteraction, repo: &dyn Repos
             let ws_str = week_start.format("%Y-%m-%d").to_string();
             let we_str = week_end.format("%Y-%m-%d").to_string();
 
-            if let Ok(weekly_lb) = repo.get_weekly_leaderboard(gid, &ws_str, &we_str) {
+            if let Ok(weekly_lb) = repo.get_weekly_leaderboard(gid, &ws_str, &we_str, false) {
                 let rank = weekly_lb.iter().position(|r| r.user_id == uid_str).map(|i| i + 1);
                 let value = match rank {
                     Some(r) => format!("#{} of {}", r, weekly_lb.len()),
@@ -253,20 +255,28 @@ fn handle_interaction(_ctx: &Context, cmd: &CommandInteraction, repo: &dyn Repos
     ))
 }
 
+#[async_trait]
 impl Plugin for SelfPlugin {
-    fn commands(&self) -> Vec<CreateCommand> {
+    fn commands(&self) -> Vec<PluginCommand> {
         vec![
-            CreateCommand::new("self").description("View your personal MapTap stats"),
+            PluginCommand {
+                name: "self",
+                command: CreateCommand::new("self").description("View your personal MapTap stats"),
+            },
         ]
     }
 
-    fn register_commands(&self) -> Vec<PluginCommand> {
-        vec![
-            PluginCommand {
-                command_name: "self".to_string(),
-                command_description: "View your personal MapTap stats".to_string(),
-                handle_interaction,
-            }
-        ]
+    async fn handle_command(&self, ctx: &Context, cmd: &CommandInteraction, repo: &dyn Repository) {
+        let response = match build_self_response(cmd, repo) {
+            Ok(r) => r,
+            Err(e) => CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(e)
+                    .ephemeral(true),
+            ),
+        };
+        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+            tracing::error!("Plugin /self failed to respond: {}", e);
+        }
     }
 }
