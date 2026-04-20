@@ -60,7 +60,7 @@ MapTapBot is a Rust Discord bot that parses game scores from map.gg, stores them
 | `parser.rs` | Parses daily and challenge score formats from raw Discord message text |
 | `models.rs` | `GameMode` enum and `MaptapScore` struct with validation |
 | `db.rs` | SQLite schema, migrations (5+), leaderboard queries, admin operations |
-| `admin.rs` | Admin-only slash command handlers (**legacy** — to be migrated to a plugin) |
+| `plugins/admin_plugin/admin.rs` | Formatting helpers + `handle_admin_cmd()` — private to `AdminPlugin` |
 | `embed.rs` | Discord embed formatting for daily/weekly/permanent leaderboards |
 | `pg_db.rs` | PostgreSQL sync (optional, enabled by `POSTGRES_URL`) |
 
@@ -76,10 +76,17 @@ MapTapBot is a Rust Discord bot that parses game scores from map.gg, stores them
 pub trait Plugin: Send + Sync {
     fn commands(&self) -> Vec<PluginCommand>;           // slash commands to register + dispatch
     async fn handle_command(&self, ctx, cmd, repo);     // called when a matching command fires
+    fn is_admin_plugin(&self) -> bool { false }         // controls registration + access gate
     fn component_prefixes(&self) -> Vec<&'static str>;  // button custom_id prefixes (default: none)
     async fn handle_component(&self, ctx, interaction, repo); // button handler (default: no-op)
 }
 ```
+
+When `is_admin_plugin()` returns `true`:
+- Commands are registered **guild-specifically** on `admin_guild_id` instead of globally.
+- Every command and component interaction is **automatically gated**: non-admin invokers receive "no permission" and the plugin is never called.
+
+Plugins have **zero knowledge of how data is stored**. All DB access — reads and writes — goes through `&dyn Repository`. The `Repository` trait is the single interface between plugins and storage.
 
 `PluginCommand` pairs a `&'static str` name with a `CreateCommand` definition. The name is used for O(n) dispatch in `handler.rs` — it must exactly match the Discord command name.
 
@@ -93,18 +100,19 @@ pub trait Plugin: Send + Sync {
 
 ### Existing plugins
 
-| Plugin | Location | Commands | Notes |
-|--------|----------|----------|-------|
-| `SelfPlugin` | `src/plugins/self_plugin/` | `/self` | Personal stats embed, ephemeral |
-| `LeaderboardPlugin` | `src/plugins/leaderboard_plugin/` | `/leaderboard_daily`, `/leaderboard_weekly`, `/leaderboard_permanent`, `/leaderboard_challenge_daily`, `/leaderboard_challenge_permanent` | Manages leaderboard message tracking + button handlers (`full_lb`, `remove_lb`, `remove_full_lb`) |
+| Plugin | Location | Commands | Admin? | Notes |
+|--------|----------|----------|--------|-------|
+| `SelfPlugin` | `src/plugins/self_plugin/` | `/self` | No | Personal stats embed, ephemeral |
+| `LeaderboardPlugin` | `src/plugins/leaderboard_plugin/` | `/leaderboard_daily`, `/leaderboard_weekly`, `/leaderboard_permanent`, `/leaderboard_challenge_daily`, `/leaderboard_challenge_permanent` | No | Owns leaderboard message tracking + button handlers (`full_lb`, `remove_lb`, `remove_full_lb`) |
+| `AdminPlugin` | `src/plugins/admin_plugin/` | `/delete_score`, `/invalidate_score`, `/list_scores`, `/list_all_scores`, `/list_users`, `/raw_score`, `/stats`, `/backup`, `/hit_list` | Yes | Guild-specific; stores only `db_path` for backup naming |
 
 ### Plugin state
 
-Plugins own their own state. `LeaderboardPlugin` holds `leaderboard_msgs` and `full_leaderboard_msgs` internally (both `std::sync::Mutex<HashMap<...>>`). The `Handler` struct no longer owns these.
+Plugins own their own state. `LeaderboardPlugin` holds `leaderboard_msgs` and `full_leaderboard_msgs` internally (both `std::sync::Mutex<HashMap<...>>`). `AdminPlugin` holds only `db_path: String`. The `Handler` struct no longer owns leaderboard tracking state.
 
-### Repository vs Database
+### Repository
 
-Plugins receive a `&dyn Repository` (read-only leaderboard/score queries). Admin operations that need write access (delete, invalidate, backup, etc.) use `&Mutex<Database>` directly — currently only the legacy `admin.rs` path does this. A future admin plugin would need to extend `Repository` or receive a write-capable handle.
+Plugins receive a `&dyn Repository` for all data access — reads and writes. `Repository` covers both leaderboard queries (used by all plugins) and admin write operations (used by `AdminPlugin`). `SqliteRepository` wraps `&Mutex<Database>` and implements the full trait. No plugin ever touches the database directly.
 
 ---
 
@@ -116,9 +124,8 @@ These are still hardcoded in `handler.rs` or live in standalone modules:
 |---------|----------|--------|
 | `/today` | `handler.rs` inline | Legacy builtin |
 | `/help` | `handler.rs` + `help.rs` | Legacy builtin |
-| Admin commands (`/delete_score`, `/invalidate_score`, `/list_scores`, `/list_all_scores`, `/raw_score`, `/stats`, `/backup`, `/hit_list`, `/list_users`) | `admin.rs` + `handler.rs` | Legacy — migrate to an admin plugin |
-| `/parse` | `handler_parse.rs` | Legacy admin command |
-| `/sync_to_postgres` | `handler_pg_sync.rs` | Legacy admin command |
+| `/parse` | `handler_parse.rs` | Legacy admin command — tightly coupled to `Handler.process_score_message` |
+| `/sync_to_postgres` | `handler_pg_sync.rs` | Legacy admin command — needs `Handler.pg_url` |
 
 ---
 

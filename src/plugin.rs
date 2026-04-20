@@ -21,6 +21,15 @@ pub trait Plugin: Send + Sync {
         repo: &dyn Repository,
     );
 
+    /// Whether this plugin's commands are admin-only.
+    /// When true:
+    /// - Commands are registered guild-specifically on `admin_guild_id` (not globally).
+    /// - Every command and component interaction is gated behind the admin ID check.
+    /// Default: false (globally registered, no extra gate).
+    fn is_admin_plugin(&self) -> bool {
+        false
+    }
+
     /// Button/component ID prefixes this plugin handles (e.g., "full_lb").
     /// Default: empty (no components).
     fn component_prefixes(&self) -> Vec<&'static str> {

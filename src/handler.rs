@@ -11,7 +11,7 @@ use serenity::model::id::{ChannelId, GuildId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::admin::{admin_commands, handle_admin_cmd};
+use crate::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option};
 use crate::db::Database;
 use crate::formatting::daily_position_reactions;
 use crate::models::GameMode;
@@ -332,44 +332,63 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        // On ready
-        let plugin_commands: Vec<CreateCommand> = self.plugins
-            .iter()
-            .flat_map(|p| p.commands().into_iter().map(|pc| pc.command))
-            .collect();
-
         // Send message to discord logging channel if it exists stating it's ready to go
         if let Some(channel_id) = self.logging_channel_id {
             let _ = ChannelId::new(channel_id)
                 .send_message(&ctx.http, CreateMessage::new().content("Ready to go!")).await;
         }
 
+        // Non-admin plugins are registered globally alongside the builtin commands.
+        let non_admin_plugin_cmds: Vec<CreateCommand> = self.plugins
+            .iter()
+            .filter(|p| !p.is_admin_plugin())
+            .flat_map(|p| p.commands().into_iter().map(|pc| pc.command))
+            .collect();
+
         let builtin_commands = vec![
             CreateCommand::new("today").description("Get a link to today's maptap challenge"),
             CreateCommand::new("help").description("Show available commands"),
         ];
 
-        let all_commands: Vec<CreateCommand> = builtin_commands
+        let all_global_commands: Vec<CreateCommand> = builtin_commands
             .into_iter()
-            .chain(plugin_commands)
+            .chain(non_admin_plugin_cmds)
             .collect();
 
-        match serenity::model::application::Command::set_global_commands(&ctx.http, all_commands).await
-        { Err(e) => {
-            error!("Failed to register slash commands: {}", e);
-        } _ => {
-            info!("Slash commands registered");
-        }}
+        match serenity::model::application::Command::set_global_commands(&ctx.http, all_global_commands).await {
+            Err(e) => error!("Failed to register slash commands: {}", e),
+            _ => info!("Slash commands registered"),
+        }
 
-        // Register admin-only commands as guild-specific on ADMIN_GUILD.
+        // Admin plugins + legacy admin commands are registered guild-specifically.
         if let Some(gid) = self.admin_guild_id {
             let guild_id = GuildId::new(gid);
-            let admin_commands = admin_commands();
-            match guild_id.set_commands(&ctx.http, admin_commands).await { Err(e) => {
-                error!("Failed to register admin guild commands on {}: {}", gid, e);
-            } _ => {
-                info!("Admin guild commands registered on {}", gid);
-            }}
+
+            let admin_plugin_cmds: Vec<CreateCommand> = self.plugins
+                .iter()
+                .filter(|p| p.is_admin_plugin())
+                .flat_map(|p| p.commands().into_iter().map(|pc| pc.command))
+                .collect();
+
+            // Legacy commands not yet migrated to a plugin.
+            let legacy_guild_cmds = vec![
+                CreateCommand::new("parse")
+                    .description("Re-process an existing Discord message through the score pipeline")
+                    .add_option(channel_id_option(DiscordCommandOption::IsRequired))
+                    .add_option(message_id_option(DiscordCommandOption::IsRequired)),
+                CreateCommand::new("sync_to_postgres")
+                    .description("Copy all SQLite data to PostgreSQL (SQLite wins on conflicts)"),
+            ];
+
+            let all_guild_cmds: Vec<CreateCommand> = admin_plugin_cmds
+                .into_iter()
+                .chain(legacy_guild_cmds)
+                .collect();
+
+            match guild_id.set_commands(&ctx.http, all_guild_cmds).await {
+                Err(e) => error!("Failed to register admin guild commands on {}: {}", gid, e),
+                _ => info!("Admin guild commands registered on {}", gid),
+            }
         }
     }
 
@@ -378,11 +397,21 @@ impl EventHandler for Handler {
             Interaction::Command(cmd) => {
                 let invoker_id = cmd.user.id.get();
                 let cmd_name = cmd.data.name.as_str();
-
-                // Check plugins first
                 let repo = SqliteRepository::new(&self.db);
+
                 for plugin in &self.plugins {
                     if plugin.commands().iter().any(|pc| pc.name == cmd_name) {
+                        if plugin.is_admin_plugin() && !self.is_admin(invoker_id) {
+                            let _ = cmd.create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("You do not have permission to use this command.")
+                                        .ephemeral(true),
+                                ),
+                            ).await;
+                            return;
+                        }
                         plugin.handle_command(&ctx, &cmd, &repo).await;
                         return;
                     }
@@ -406,36 +435,6 @@ impl EventHandler for Handler {
                             error!("Failed to respond to /help: {}", e);
                         }
                     }
-                    // ── Admin commands ───────────────────────────────────────
-                    name @ ("delete_score"
-                    | "invalidate_score"
-                    | "list_scores"
-                    | "list_all_scores"
-                    | "list_users"
-                    | "raw_score"
-                    | "stats"
-                    | "hit_list"
-                    | "backup") => {
-                        if !self.is_admin(invoker_id) {
-                            let response = CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("You do not have permission to use this command.")
-                                    .ephemeral(true),
-                            );
-                            let _ = cmd.create_response(&ctx.http, response).await;
-                            return;
-                        }
-
-                        let content = handle_admin_cmd(name, &cmd.data.options(), invoker_id, &self.db, &self.db_path);
-                        let response = CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(content)
-                                .ephemeral(true),
-                        );
-                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                            error!("Failed to respond to /{}: {}", name, e);
-                        }
-                    }
                     "parse" => self.handle_parse_cmd(&ctx, &cmd).await,
                     "sync_to_postgres" => self.handle_sync_to_postgres_cmd(&ctx, &cmd).await,
                     _ => {}
@@ -448,6 +447,17 @@ impl EventHandler for Handler {
 
                 for plugin in &self.plugins {
                     if plugin.component_prefixes().contains(&prefix) {
+                        if plugin.is_admin_plugin() && !self.is_admin(interaction.user.id.get()) {
+                            let _ = interaction.create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("You do not have permission to use this command.")
+                                        .ephemeral(true),
+                                ),
+                            ).await;
+                            return;
+                        }
                         plugin.handle_component(&ctx, &interaction, &repo).await;
                         return;
                     }

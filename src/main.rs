@@ -2,7 +2,6 @@ mod db;
 mod handler;
 mod models;
 mod parser;
-mod admin;
 mod formatting;
 mod help;
 mod embed;
@@ -20,6 +19,7 @@ use serenity::prelude::*;
 use tracing::info;
 
 use crate::plugin::Plugin;
+use crate::plugins::admin_plugin::AdminPlugin;
 use crate::plugins::leaderboard_plugin::LeaderboardPlugin;
 use crate::plugins::self_plugin::SelfPlugin;
 
@@ -103,6 +103,7 @@ async fn main() {
     let plugins: Vec<Box<dyn Plugin>> = vec![
         Box::new(SelfPlugin),
         Box::new(LeaderboardPlugin::new()),
+        Box::new(AdminPlugin::new(db_path.clone())),
     ];
 
     let mut client = Client::builder(&token, intents)

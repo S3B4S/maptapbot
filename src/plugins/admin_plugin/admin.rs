@@ -1,8 +1,6 @@
-use serenity::all::{CommandOptionType, CreateCommand, CreateCommandOption};
-
-use crate::db::{Database, DbStats, ScoreRow, StatsDelta, StatsSnapshot};
-use crate::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option, user_id_option};
+use crate::db::{DbStats, ScoreRow, StatsDelta, StatsSnapshot};
 use crate::formatting::{discord_message_link, truncate_username};
+use crate::repository::Repository;
 
 /// Format a one-line score summary + optional Discord message link for admin confirmations.
 fn format_score_detail(row: &ScoreRow) -> String {
@@ -173,17 +171,13 @@ fn format_elapsed_since(taken_at: &str) -> String {
     }
 }
 
-enum AdminCommand {
-    DeleteScore,
-    InvalidateScore,
-}
-
 pub fn handle_admin_cmd(
     name: &str,
     options: &[serenity::model::application::ResolvedOption<'_>],
     invoker_id: u64,
-    db_param: &std::sync::Mutex<Database>,
-    db_path: &str) -> String {
+    repo: &dyn Repository,
+    db_path: &str,
+) -> String {
     let get_str = |key: &str| -> Option<&str> {
         options.iter().find_map(|o| {
             if o.name == key {
@@ -195,22 +189,17 @@ pub fn handle_admin_cmd(
         })
     };
 
-    let db = match db_param.lock() {
-        Ok(db) => db,
-        Err(e) => return format!("Internal error: failed to lock DB: {}", e),
-    };
-
     match name {
         "delete_score" => {
             let Some(message_id) = get_str("message_id") else {
                 return "Missing required parameter: message_id".to_string();
             };
-            let detail = db.get_score(message_id)
+            let detail = repo.get_score(message_id)
                 .ok()
                 .flatten()
                 .map(|row| format!("\n{}", format_score_detail(&row)))
                 .unwrap_or_default();
-            match db.delete_score(message_id) {
+            match repo.delete_score(message_id) {
                 Ok(0) => format!("No score found for message_id `{}`.", message_id),
                 Ok(n) => format!("Deleted {} score(s) for message_id `{}`.{}", n, message_id, detail),
                 Err(e) => format!("DB error: {}", e),
@@ -220,12 +209,12 @@ pub fn handle_admin_cmd(
             let Some(message_id) = get_str("message_id") else {
                 return "Missing required parameter: message_id".to_string();
             };
-            let detail = db.get_score(message_id)
+            let detail = repo.get_score(message_id)
                 .ok()
                 .flatten()
                 .map(|row| format!("\n{}", format_score_detail(&row)))
                 .unwrap_or_default();
-            match db.invalidate_score(message_id) {
+            match repo.invalidate_score(message_id) {
                 Ok(0) => format!("No score found for message_id `{}`.", message_id),
                 Ok(n) => format!(
                     "Marked {} score(s) as invalid for message_id `{}`. \
@@ -239,18 +228,18 @@ pub fn handle_admin_cmd(
             let Some(user_id) = get_str("user_id") else {
                 return "Missing required parameter: user_id".to_string();
             };
-            match db.list_scores(user_id) {
+            match repo.list_scores(user_id) {
                 Ok(rows) if rows.is_empty() => format!("No scores found for user `{}`.", user_id),
                 Ok(rows) => format_score_rows(&rows),
                 Err(e) => format!("DB error: {}", e),
             }
         }
-        "list_all_scores" => match db.list_all_scores() {
+        "list_all_scores" => match repo.get_scores() {
             Ok(rows) if rows.is_empty() => "No scores in the database.".to_string(),
             Ok(rows) => format_score_rows(&rows),
             Err(e) => format!("DB error: {}", e),
         },
-        "list_users" => match db.list_users() {
+        "list_users" => match repo.list_users() {
             Ok(rows) if rows.is_empty() => "No users in the database.".to_string(),
             Ok(rows) => {
                 let mut out = format!("**Users ({} total)**\n```\n", rows.len());
@@ -269,7 +258,7 @@ pub fn handle_admin_cmd(
             let Some(message_id) = get_str("message_id") else {
                 return "Missing required parameter: message_id".to_string();
             };
-            match db.raw_score(message_id) {
+            match repo.raw_score(message_id) {
                 Ok(Some(raw)) => format!(
                     "Raw message for message_id `{}`:\n```\n{}\n```",
                     message_id, raw
@@ -279,38 +268,32 @@ pub fn handle_admin_cmd(
             }
         }
         "stats" => {
-            let current = match db.stats() {
+            let current = match repo.stats() {
                 Ok(s) => s,
                 Err(e) => return format!("DB error: {}", e),
             };
             let invoker_key = invoker_id.to_string();
-            let prev = match db.get_stats_snapshot(&invoker_key) {
+            let prev = match repo.get_stats_snapshot(&invoker_key) {
                 Ok(p) => p,
                 Err(e) => return format!("DB error: {}", e),
             };
 
-            // Build the "current stats" block (same format as before).
             let current_block = format_stats_block(&current);
 
-            // Build the "since your last /stats" block, if we have a baseline.
             let delta_block = match prev.as_ref() {
                 Some(prev) => {
-                    let delta = match db.scores_since(&prev.taken_at) {
+                    let delta = match repo.scores_since(&prev.taken_at) {
                         Ok(d) => d,
                         Err(e) => return format!("DB error: {}", e),
                     };
                     format_delta_block(prev, &current, &delta)
                 }
-                None => {
-                    "_No previous snapshot for you — baseline saved._".to_string()
-                }
+                None => "_No previous snapshot for you — baseline saved._".to_string(),
             };
 
             // Persist the new snapshot *after* reading the previous one.
-            // Use SQLite's datetime format so lexical comparison against
-            // `scores.created_at` works in future `scores_since` calls.
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            if let Err(e) = db.upsert_stats_snapshot(&invoker_key, &current, &now) {
+            if let Err(e) = repo.upsert_stats_snapshot(&invoker_key, &current, &now) {
                 return format!("DB error: {}", e);
             }
 
@@ -320,7 +303,7 @@ pub fn handle_admin_cmd(
             let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
             let backup_path = format!("{}.backup_{}", db_path, timestamp);
 
-            match db.backup(&backup_path) {
+            match repo.backup(&backup_path) {
                 Ok(()) => format!("Backup created: `{}`", backup_path),
                 Err(e) => format!("Backup failed: {}", e),
             }
@@ -329,7 +312,7 @@ pub fn handle_admin_cmd(
             let action = get_str("action").unwrap_or("");
             let user_id = get_str("user_id");
             match action {
-                "read" => match db.get_hit_list() {
+                "read" => match repo.get_hit_list() {
                     Ok(list) if list.is_empty() => "Hit list is empty.".to_string(),
                     Ok(list) => {
                         let lines: Vec<String> = list
@@ -342,9 +325,9 @@ pub fn handle_admin_cmd(
                 },
                 "add" => match user_id {
                     None => "Provide a `user_id` to add.".to_string(),
-                    Some(id) => match db.add_to_hit_list(id) {
+                    Some(id) => match repo.add_to_hit_list(id) {
                         Ok(()) => {
-                            let name = db
+                            let name = repo
                                 .get_hit_list()
                                 .ok()
                                 .and_then(|l| l.into_iter().find(|(uid, _)| uid == id))
@@ -357,7 +340,7 @@ pub fn handle_admin_cmd(
                 },
                 "delete" => match user_id {
                     None => "Provide a `user_id` to delete.".to_string(),
-                    Some(id) => match db.remove_from_hit_list(id) {
+                    Some(id) => match repo.remove_from_hit_list(id) {
                         Ok(0) => format!("User `{}` was not on the hit list.", id),
                         Ok(_) => format!("Removed `{}` from the hit list.", id),
                         Err(e) => format!("DB error: {}", e),
@@ -368,49 +351,4 @@ pub fn handle_admin_cmd(
         }
         _ => "Unknown admin command.".to_string(),
     }
-}
-
-pub fn admin_commands() -> Vec<CreateCommand> { 
-    vec![
-        CreateCommand::new("delete_score")
-            .description("Delete a specific score entry")
-            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
-        CreateCommand::new("list_scores")
-            .description("Show all scores for a given user")
-            .add_option(user_id_option(DiscordCommandOption::IsRequired)),
-        CreateCommand::new("list_all_scores")
-            .description("Dump all scores in the database"),
-        CreateCommand::new("list_users")
-            .description("List all known users"),
-        CreateCommand::new("raw_score")
-            .description("Show the raw stored message for a score entry")
-            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
-        CreateCommand::new("invalidate_score")
-            .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
-            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
-        CreateCommand::new("stats")
-            .description("Show aggregate DB stats"),
-        CreateCommand::new("backup")
-            .description("Create a timestamped backup of the database"),
-        CreateCommand::new("hit_list")
-            .description("Manage the hit list of users to mess with")
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::String,
-                    "action",
-                    "read | add | delete",
-                )
-                .add_string_choice("read", "read")
-                .add_string_choice("add", "add")
-                .add_string_choice("delete", "delete")
-                .required(true),
-            )
-            .add_option(user_id_option(DiscordCommandOption::IsOptional)),
-        CreateCommand::new("parse")
-            .description("Re-process an existing Discord message through the score pipeline")
-            .add_option(channel_id_option(DiscordCommandOption::IsRequired))
-            .add_option(message_id_option(DiscordCommandOption::IsRequired)),
-        CreateCommand::new("sync_to_postgres")
-            .description("Copy all SQLite data to PostgreSQL (SQLite wins on conflicts)"),
-    ]
 }

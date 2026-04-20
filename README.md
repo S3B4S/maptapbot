@@ -32,8 +32,9 @@ cd maptapbot
 ```env
 DISCORD_TOKEN=your_bot_token_here
 DATABASE_PATH=maptap.db
-DISCORD_CHANNEL_IDS=123456789,987654321
-ADMIN_IDS=111111111,222222222
+DISCORD_FILTER_CHANNEL_IDS=123456789,987654321
+DISCORD_ADMIN_USER_IDS=111111111,222222222
+DISCORD_ADMIN_GUILD_ID=222222222222
 ```
 
 3. Build and run:
@@ -52,8 +53,11 @@ The bot will start and connect to Discord.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Your Discord bot token |
 | `DATABASE_PATH` | No | Path to SQLite database (default: `maptap.db`) |
-| `DISCORD_CHANNEL_IDS` | No | Comma-separated channel IDs to monitor. If not set, monitors all channels |
-| `ADMIN_IDS` | No | Comma-separated Discord user IDs with admin privileges |
+| `DISCORD_FILTER_CHANNEL_IDS` | No | Comma-separated channel IDs to monitor. If not set, monitors all channels |
+| `DISCORD_ADMIN_USER_IDS` | No | Comma-separated Discord user IDs with admin privileges |
+| `DISCORD_ADMIN_GUILD_ID` | No | Guild where admin-only commands are registered. If not set, admin commands won't appear anywhere |
+| `DISCORD_LOGGING_CHANNEL_ID` | No | Channel ID to receive bot startup log messages |
+| `POSTGRES_URL` | No | Enables `/sync_to_postgres` command to copy data to PostgreSQL |
 
 ### Example Configuration
 
@@ -62,10 +66,11 @@ The bot will start and connect to Discord.
 DISCORD_TOKEN=MzU0NjUyMzQyNDEyMzQ1MjM0.DPEUMg.abcdefghijklmnopqrstuvwxyz
 
 # Optional - Restrict to specific channels
-DISCORD_CHANNEL_IDS=1234567890,0987654321
+DISCORD_FILTER_CHANNEL_IDS=1234567890,0987654321
 
-# Optional - Grant admin access
-ADMIN_IDS=123456789,987654321
+# Optional - Grant admin access (user IDs) and set the guild for admin commands
+DISCORD_ADMIN_USER_IDS=123456789,987654321
+DISCORD_ADMIN_GUILD_ID=111122223333
 
 # Optional - Custom database location
 DATABASE_PATH=/var/lib/maptap/scores.db
@@ -115,42 +120,21 @@ Just paste your results into the monitored channel and the bot reacts with 🗺�
 
 #### Admin Commands
 
-Available only to users in `ADMIN_IDS`:
+Available only to users in `DISCORD_ADMIN_USER_IDS`. These commands are registered exclusively on the `DISCORD_ADMIN_GUILD_ID` server and are invisible elsewhere.
 
-```
-/delete_score user_id:<user_id> date:<YYYY-MM-DD> mode:<mode>
-```
-Delete a specific score entry.
-
-```
-/list_scores user_id:<user_id>
-```
-View all scores for a specific user.
-
-```
-/list_all_scores
-```
-View entire score database.
-
-```
-/list_users
-```
-Show all registered users.
-
-```
-/raw_score user_id:<user_id> date:<YYYY-MM-DD> mode:<mode>
-```
-Show the raw stored message for a score entry.
-
-```
-/invalidate_score message_id:<id>
-```
-Soft-delete a score entry (sets `invalid = 1`). The row stays in the table but is excluded from leaderboards; if the user previously posted a legit score for the same (guild, date, mode), that earlier row becomes the effective score. Prefer this over `/delete_score` for normal "this score shouldn't count" cases.
-
-```
-/stats
-```
-Show aggregate database stats (total entries, unique users, date range, counts by mode).
+| Command | Description |
+|---------|-------------|
+| `/delete_score <message_id>` | Hard-delete a score entry by Discord message ID |
+| `/invalidate_score <message_id>` | Soft-delete a score entry — excluded from leaderboards, but the prior valid score for that user/date/mode becomes effective |
+| `/list_scores <user_id>` | Show all score history for a user |
+| `/list_all_scores` | Dump the full scores table |
+| `/list_users` | List all known users |
+| `/raw_score <message_id>` | Show the raw stored message for a score entry |
+| `/stats` | Show aggregate DB stats with delta since your last `/stats` call |
+| `/backup` | Create a timestamped backup of the SQLite database |
+| `/hit_list <action> [user_id]` | Manage the hit list (`read`, `add`, `delete`) |
+| `/parse <channel_id> <message_id>` | Re-process an existing Discord message through the score pipeline |
+| `/sync_to_postgres` | Copy all SQLite data to PostgreSQL (requires `POSTGRES_URL`) |
 
 ![Admin Commands](images/commands.png)
 
@@ -158,7 +142,9 @@ Show aggregate database stats (total entries, unique users, date range, counts b
 
 ### Core Components
 
-- **Handler** (`src/handler.rs`): Processes Discord events and commands
+- **Handler** (`src/handler.rs`): Processes Discord events, routes interactions to plugins
+- **Plugin system** (`src/plugin.rs`, `src/plugins/`): Self-contained feature modules; each plugin registers its own commands and handles its own interactions. Admin plugins set `is_admin_plugin() = true` for automatic gating and guild-specific registration
+- **Repository** (`src/repository.rs`): Trait abstracting all data access — plugins only interact with storage through this interface
 - **Parser** (`src/parser.rs`): Extracts scores from message content
 - **Database** (`src/db.rs`): SQLite interface for score storage
 - **Models** (`src/models.rs`): Data structures for scores and users
@@ -197,15 +183,23 @@ For production deployments:
 ```
 maptapbot/
 ├── src/
-│   ├── main.rs           # Entry point and bot initialization
-│   ├── handler.rs        # Event handlers and command processing
-│   ├── parser.rs         # Score message parsing logic
-│   ├── db.rs            # SQLite database operations
-│   ├── models.rs        # Data structures
-│   └── tests/           # Unit tests
-├── Cargo.toml           # Rust dependencies
-├── Dockerfile           # Container configuration
-└── README.md            # This file
+│   ├── main.rs             # Entry point, plugin instantiation
+│   ├── handler.rs          # Discord event handler, plugin dispatch
+│   ├── plugin.rs           # Plugin trait definition
+│   ├── plugins/
+│   │   ├── admin_plugin/   # Admin commands (guild-only, gated)
+│   │   ├── leaderboard_plugin/ # Leaderboard commands + buttons
+│   │   └── self_plugin/    # /self personal stats
+│   ├── repository.rs       # Repository trait (all data access)
+│   ├── sqlite_repo.rs      # SQLite implementation of Repository
+│   ├── parser.rs           # Score message parsing logic
+│   ├── db.rs               # SQLite database operations
+│   ├── models.rs           # Data structures
+│   └── tests/              # Unit tests
+├── specs/                  # Spec files (source of truth for behavior)
+├── Cargo.toml              # Rust dependencies
+├── Dockerfile              # Container configuration
+└── README.md               # This file
 ```
 
 ### Running Tests
