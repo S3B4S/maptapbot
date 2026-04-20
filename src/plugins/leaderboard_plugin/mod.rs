@@ -323,87 +323,17 @@ impl LeaderboardPlugin {
         ))
     }
 
-    async fn handle_daily_permanent(
+    /// Common flow: post a leaderboard embed, store message tracking, and send button follow-up.
+    async fn post_leaderboard_embed(
         &self,
         ctx: &Context,
         cmd: &CommandInteraction,
         name: &str,
         gid: u64,
         invoker_id: u64,
-        repo: &dyn Repository,
+        embed: CreateEmbed,
+        date_str_for_button: &str,
     ) {
-        // Resolve optional date param for daily commands.
-        let is_daily =
-            name == "leaderboard_daily" || name == "leaderboard_challenge_daily";
-        let resolved_date: Option<NaiveDate> = if is_daily {
-            let options = cmd.data.options();
-            let raw_date = options.iter().find_map(|o| {
-                if o.name == "date" {
-                    if let ResolvedValue::String(s) = o.value {
-                        return Some(s);
-                    }
-                }
-                None
-            });
-            let today = Utc::now().date_naive();
-            let date = match raw_date {
-                None => today,
-                Some("yesterday" | "yest" | "y") => today - chrono::Duration::days(1),
-                Some("tomorrow" | "tmro" | "t") => today + chrono::Duration::days(1),
-                Some(s) => match parse_date_str(s, today) {
-                    Some(d) => d,
-                    None => {
-                        let _ = cmd
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("Unrecognised date format. Try DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, or tomorrow/tmro/t.")
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                },
-            };
-            let max_date = today + chrono::Duration::weeks(1);
-            if date > max_date {
-                let _ = cmd
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("That date is too far in the future.")
-                                .ephemeral(true),
-                        ),
-                    )
-                    .await;
-                return;
-            }
-            Some(date)
-        } else {
-            None
-        };
-
-        let date_str_for_button = resolved_date
-            .unwrap_or_else(|| Utc::now().date_naive())
-            .format("%Y-%m-%d")
-            .to_string();
-
-        let embed = match self.build_leaderboard_embed(name, gid, resolved_date, repo) {
-            Ok(e) => e,
-            Err(msg) => {
-                let response = CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(msg)
-                        .ephemeral(true),
-                );
-                let _ = cmd.create_response(&ctx.http, response).await;
-                return;
-            }
-        };
-
         let cmd_key = cmd_name_key(name);
 
         // Delete the previous leaderboard message for this command, if any.
@@ -458,6 +388,108 @@ impl LeaderboardPlugin {
         if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
             error!("Failed to send button follow-up for /{}: {}", name, e);
         }
+    }
+
+    async fn handle_daily(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        name: &str,
+        gid: u64,
+        invoker_id: u64,
+        repo: &dyn Repository,
+    ) {
+        let options = cmd.data.options();
+        let raw_date = options.iter().find_map(|o| {
+            if o.name == "date" {
+                if let ResolvedValue::String(s) = o.value {
+                    return Some(s);
+                }
+            }
+            None
+        });
+        let today = Utc::now().date_naive();
+        let date = match raw_date {
+            None => today,
+            Some("yesterday" | "yest" | "y") => today - chrono::Duration::days(1),
+            Some("tomorrow" | "tmro" | "t") => today + chrono::Duration::days(1),
+            Some(s) => match parse_date_str(s, today) {
+                Some(d) => d,
+                None => {
+                    let _ = cmd
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Unrecognised date format. Try DD, DD-MM, DD-MM-YYYY, yesterday/yest/y, or tomorrow/tmro/t.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+            },
+        };
+        let max_date = today + chrono::Duration::weeks(1);
+        if date > max_date {
+            let _ = cmd
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("That date is too far in the future.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+
+        let date_str_for_button = date.format("%Y-%m-%d").to_string();
+
+        let embed = match self.build_leaderboard_embed(name, gid, Some(date), repo) {
+            Ok(e) => e,
+            Err(msg) => {
+                let response = CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(msg)
+                        .ephemeral(true),
+                );
+                let _ = cmd.create_response(&ctx.http, response).await;
+                return;
+            }
+        };
+
+        self.post_leaderboard_embed(ctx, cmd, name, gid, invoker_id, embed, &date_str_for_button)
+            .await;
+    }
+
+    async fn handle_permanent(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        name: &str,
+        gid: u64,
+        invoker_id: u64,
+        repo: &dyn Repository,
+    ) {
+        let date_str_for_button = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+
+        let embed = match self.build_leaderboard_embed(name, gid, None, repo) {
+            Ok(e) => e,
+            Err(msg) => {
+                let response = CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(msg)
+                        .ephemeral(true),
+                );
+                let _ = cmd.create_response(&ctx.http, response).await;
+                return;
+            }
+        };
+
+        self.post_leaderboard_embed(ctx, cmd, name, gid, invoker_id, embed, &date_str_for_button)
+            .await;
     }
 
     async fn handle_weekly(
@@ -1011,14 +1043,17 @@ impl Plugin for LeaderboardPlugin {
 
         match cmd.data.name.as_str() {
             name @ ("leaderboard_daily"
-            | "leaderboard_permanent"
-            | "leaderboard_challenge_daily"
-            | "leaderboard_challenge_permanent") => {
-                self.handle_daily_permanent(ctx, cmd, name, gid, invoker_id, repo)
+            | "leaderboard_challenge_daily") => {
+                self.handle_daily(ctx, cmd, name, gid, invoker_id, repo)
                     .await;
             }
             "leaderboard_weekly" => {
                 self.handle_weekly(ctx, cmd, gid, invoker_id, repo).await;
+            }
+            name @ ("leaderboard_permanent"
+            | "leaderboard_challenge_permanent") => {
+                self.handle_permanent(ctx, cmd, name, gid, invoker_id, repo)
+                    .await;
             }
             _ => {}
         }
