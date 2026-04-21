@@ -41,14 +41,6 @@ pub struct Handler {
     plugins: Vec<Box<dyn Plugin>>,
 }
 
-fn handle_today_cmd() -> CreateInteractionResponse {
-    CreateInteractionResponse::Message(
-        CreateInteractionResponseMessage::new()
-            .content("Today's challenge: https://maptap.gg/")
-            .ephemeral(true),
-    )
-}
-
 impl Handler {
     pub fn new(
         db: Database,
@@ -346,7 +338,6 @@ impl EventHandler for Handler {
             .collect();
 
         let builtin_commands = vec![
-            CreateCommand::new("today").description("Get a link to today's maptap challenge"),
             CreateCommand::new("help").description("Show available commands"),
         ];
 
@@ -418,16 +409,9 @@ impl EventHandler for Handler {
                 }
 
                 match cmd_name {
-                    "today" => {
-                        let response = handle_today_cmd();
-                        if let Err(e) = cmd.create_response(&ctx.http, response).await {
-                            error!("Failed to respond to /today: {}", e);
-                        }
-                    }
                     "help" => {
                         let user_cmds: Vec<(&str, &str)> = {
                             let mut cmds = vec![
-                                ("today", "Get a link to today's maptap challenge"),
                                 ("help", "Show available commands"),
                             ];
                             cmds.extend(

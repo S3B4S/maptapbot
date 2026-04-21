@@ -22,6 +22,7 @@ use crate::plugin::Plugin;
 use crate::plugins::admin_plugin::AdminPlugin;
 use crate::plugins::leaderboard_plugin::LeaderboardPlugin;
 use crate::plugins::self_plugin::SelfPlugin;
+use crate::plugins::today_plugin::TodayPlugin;
 
 #[tokio::main]
 async fn main() {
@@ -101,6 +102,7 @@ async fn main() {
         | GatewayIntents::MESSAGE_CONTENT;
 
     let plugins: Vec<Box<dyn Plugin>> = vec![
+        Box::new(TodayPlugin),
         Box::new(SelfPlugin),
         Box::new(LeaderboardPlugin::new()),
         Box::new(AdminPlugin::new(db_path.clone())),
