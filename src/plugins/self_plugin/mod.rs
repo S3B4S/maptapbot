@@ -186,11 +186,11 @@ fn build_self_response(cmd: &CommandInteraction, repo: &dyn Repository) -> Resul
         .footer(CreateEmbedFooter::new(footers[footer_idx]));
 
     if let Some((score, date)) = personal_best {
-        embed = embed.field("🚀 Personal best", format!("{} on {}", score, date), true);
+        embed = embed.field("🚀 Personal best", format!("{} on {}", score, date), false);
     }
 
     if let Some(since) = playing_since {
-        embed = embed.field("📅 Playing since", since, true);
+        embed = embed.field("📅 Playing since", since, false);
     }
 
     // Daily and weekly rank — only available in guilds
