@@ -958,6 +958,7 @@ impl Plugin for LeaderboardPlugin {
         vec![
             PluginCommand {
                 name: "leaderboard_daily",
+                description: "Show a day's leaderboard for this server",
                 command: CreateCommand::new("leaderboard_daily")
                     .description("Show a day's leaderboard for this server")
                     .add_option(
@@ -971,6 +972,7 @@ impl Plugin for LeaderboardPlugin {
             },
             PluginCommand {
                 name: "leaderboard_weekly",
+                description: "Show a week's leaderboard for this server",
                 command: CreateCommand::new("leaderboard_weekly")
                     .description("Show a week's leaderboard for this server")
                     .add_option(
@@ -994,11 +996,13 @@ impl Plugin for LeaderboardPlugin {
             },
             PluginCommand {
                 name: "leaderboard_permanent",
+                description: "Show the all-time average leaderboard for this server",
                 command: CreateCommand::new("leaderboard_permanent")
                     .description("Show the all-time average leaderboard for this server"),
             },
             PluginCommand {
                 name: "leaderboard_challenge_daily",
+                description: "Show a day's challenge leaderboard for this server",
                 command: CreateCommand::new("leaderboard_challenge_daily")
                     .description("Show a day's challenge leaderboard for this server")
                     .add_option(
@@ -1012,6 +1016,7 @@ impl Plugin for LeaderboardPlugin {
             },
             PluginCommand {
                 name: "leaderboard_challenge_permanent",
+                description: "Show the all-time challenge leaderboard for this server",
                 command: CreateCommand::new("leaderboard_challenge_permanent")
                     .description("Show the all-time challenge leaderboard for this server"),
             },

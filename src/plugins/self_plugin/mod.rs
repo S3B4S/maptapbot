@@ -261,6 +261,7 @@ impl Plugin for SelfPlugin {
         vec![
             PluginCommand {
                 name: "self",
+                description: "View your personal MapTap stats (only visible for you)",
                 command: CreateCommand::new("self").description("View your personal MapTap stats"),
             },
         ]

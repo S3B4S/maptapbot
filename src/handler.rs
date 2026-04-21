@@ -425,7 +425,23 @@ impl EventHandler for Handler {
                         }
                     }
                     "help" => {
-                        let content = build_help_text(self.is_admin(invoker_id));
+                        let user_cmds: Vec<(&str, &str)> = {
+                            let mut cmds = vec![
+                                ("today", "Get a link to today's maptap challenge"),
+                                ("help", "Show available commands"),
+                            ];
+                            cmds.extend(
+                                self.plugins.iter()
+                                    .filter(|p| !p.is_admin_plugin())
+                                    .flat_map(|p| p.commands().into_iter().map(|pc| (pc.name, pc.description)))
+                            );
+                            cmds
+                        };
+                        let admin_cmds: Vec<(&str, &str)> = self.plugins.iter()
+                            .filter(|p| p.is_admin_plugin())
+                            .flat_map(|p| p.commands().into_iter().map(|pc| (pc.name, pc.description)))
+                            .collect();
+                        let content = build_help_text(&user_cmds, &admin_cmds, self.is_admin(invoker_id));
                         let response: CreateInteractionResponse = CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
                                 .content(content)

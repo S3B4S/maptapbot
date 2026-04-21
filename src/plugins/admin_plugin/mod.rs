@@ -30,50 +30,59 @@ impl Plugin for AdminPlugin {
         vec![
             PluginCommand {
                 name: "delete_score",
+                description: "Delete a specific score entry",
                 command: CreateCommand::new("delete_score")
                     .description("Delete a specific score entry")
                     .add_option(message_id_option(DiscordCommandOption::IsRequired)),
             },
             PluginCommand {
                 name: "invalidate_score",
+                description: "Mark a score entry invalid (soft-delete; prior valid score becomes effective)",
                 command: CreateCommand::new("invalidate_score")
                     .description("Mark a score entry invalid (soft-delete; prior valid score becomes effective)")
                     .add_option(message_id_option(DiscordCommandOption::IsRequired)),
             },
             PluginCommand {
                 name: "list_scores",
+                description: "Show all scores for a given user",
                 command: CreateCommand::new("list_scores")
                     .description("Show all scores for a given user")
                     .add_option(user_id_option(DiscordCommandOption::IsRequired)),
             },
             PluginCommand {
                 name: "list_all_scores",
+                description: "Dump all scores in the database",
                 command: CreateCommand::new("list_all_scores")
                     .description("Dump all scores in the database"),
             },
             PluginCommand {
                 name: "list_users",
+                description: "List all known users",
                 command: CreateCommand::new("list_users")
                     .description("List all known users"),
             },
             PluginCommand {
                 name: "raw_score",
+                description: "Show the raw stored message for a score entry",
                 command: CreateCommand::new("raw_score")
                     .description("Show the raw stored message for a score entry")
                     .add_option(message_id_option(DiscordCommandOption::IsRequired)),
             },
             PluginCommand {
                 name: "stats",
+                description: "Show aggregate DB stats",
                 command: CreateCommand::new("stats")
                     .description("Show aggregate DB stats"),
             },
             PluginCommand {
                 name: "backup",
+                description: "Create a timestamped backup of the database",
                 command: CreateCommand::new("backup")
                     .description("Create a timestamped backup of the database"),
             },
             PluginCommand {
                 name: "hit_list",
+                description: "Manage the hit list of users to mess with",
                 command: CreateCommand::new("hit_list")
                     .description("Manage the hit list of users to mess with")
                     .add_option(

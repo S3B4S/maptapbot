@@ -5,6 +5,7 @@ use crate::repository::Repository;
 
 pub struct PluginCommand {
     pub name: &'static str,
+    pub description: &'static str,
     pub command: CreateCommand,
 }
 
