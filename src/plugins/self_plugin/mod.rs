@@ -124,30 +124,13 @@ fn build_self_response(cmd: &CommandInteraction, repo: &dyn Repository) -> Resul
         best
     };
 
-    // Per-tile averages (positions 0–4) across all effective scores
-    let tile_scores: [Vec<f64>; 5] = std::array::from_fn(|i| {
-        effective.iter()
-            .filter_map(|s| {
-                [s.score1, s.score2, s.score3, s.score4, s.score5][i].map(|v| v as f64)
-            })
-            .collect()
-    });
+    // Zero tiles across all effective scores
+    let zero_tiles: u32 = effective.iter()
+        .flat_map(|s| [s.score1, s.score2, s.score3, s.score4, s.score5])
+        .filter(|t| *t == Some(0))
+        .count() as u32;
 
-    let tile_avgs: Vec<Option<f64>> = tile_scores.iter()
-        .map(|vals| {
-            if vals.is_empty() { None } else {
-                Some(vals.iter().sum::<f64>() / vals.len() as f64)
-            }
-        })
-        .collect();
-
-    let strongest_tile: Option<(usize, f64)> = tile_avgs.iter().enumerate()
-        .filter_map(|(i, avg)| avg.map(|a| (i, a)))
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let weakest_tile: Option<(usize, f64)> = tile_avgs.iter().enumerate()
-        .filter_map(|(i, avg)| avg.map(|a| (i, a)))
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let zero_pct = if total_tiles > 0 { zero_tiles * 100 / total_tiles } else { 0 };
 
     // Rotating footer
     let footers = [
@@ -178,6 +161,11 @@ fn build_self_response(cmd: &CommandInteraction, repo: &dyn Repository) -> Resul
         .field(
             "💯 Perfect 100s",
             format!("{} tiles scored 100 ({}% of all tiles)", perfect_100s, perfect_pct),
+            false,
+        )
+        .field(
+            "😬 Zero tiles",
+            format!("{} tiles scored 0 ({}% of all tiles)", zero_tiles, zero_pct),
             false,
         )
         .field(
@@ -238,14 +226,6 @@ fn build_self_response(cmd: &CommandInteraction, repo: &dyn Repository) -> Resul
                 embed = embed.field("📆 This week's rank", value, true);
             }
         }
-    }
-
-    if let Some((pos, avg)) = strongest_tile {
-        embed = embed.field("🧩 Strongest tile", format!("Tile {} — avg {:.1}", pos + 1, avg), true);
-    }
-
-    if let Some((pos, avg)) = weakest_tile {
-        embed = embed.field("😬 Weakest tile", format!("Tile {} — avg {:.1}", pos + 1, avg), true);
     }
 
     Ok(CreateInteractionResponse::Message(

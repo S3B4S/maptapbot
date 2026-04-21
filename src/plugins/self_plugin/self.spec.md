@@ -31,14 +31,13 @@ No parameters. Stats are scoped to the invoking user across all guilds (scores a
 |---|---|---|
 | 🎯 | **Scores submitted** | `{N} daily · {N} challenge · {N} total` |
 | 💯 | **Perfect 100s** | `{N} tiles scored 100 ({pct}% of all tiles)` |
+| 😬 | **Zero tiles** | `{N} tiles scored 0 ({pct}% of all tiles)` |
 | 🔥 | **Current streak** | `{N} days in a row` — or `No active streak` if they missed yesterday |
 | 🏆 | **Best streak** | `{N} days` |
 | ⭐ | **Average score** | `{avg} daily · {avg} challenge` (1 decimal place each; omit a mode if no scores) |
 | 🚀 | **Personal best** | `{score} on {Month Day, YYYY}` (highest ever final score, daily mode) |
 | 📅 | **Playing since** | `{Month Day, YYYY}` (date of their very first recorded score) |
 | 🏅 | **Server rank** | `#{rank} of {total} on the permanent leaderboard` (guild-only; omitted in DMs) |
-| 🧩 | **Strongest tile** | `Tile {N} — avg {score}` (tile position 1–5 with their highest average across all scores) |
-| 😬 | **Weakest tile** | `Tile {N} — avg {score}` (tile position with their lowest average) |
 
 #### Streak definition
 
