@@ -363,6 +363,20 @@ impl Database {
             )?;
         }
 
+        // Migration 6: add `banned` column to users table.
+        let has_banned: bool = {
+            let mut stmt = self.conn.prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'banned'",
+            )?;
+            let count: i64 = stmt.query_row([], |row| row.get(0))?;
+            count > 0
+        };
+
+        if !has_banned {
+            self.conn
+                .execute_batch("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0;")?;
+        }
+
         // Effective-row index — created after all migrations have ensured the
         // `invalid` column exists. Idempotent so safe to run on every open.
         self.conn.execute_batch(
@@ -463,6 +477,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              ORDER BY e.final_score DESC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
@@ -510,6 +525,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              GROUP BY e.user_id
              ORDER BY avg_final DESC",
         )?;
@@ -554,6 +570,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              ORDER BY e.final_score DESC, e.time_spent_ms ASC",
         )?;
         let rows = stmt.query_map(params![guild_id.to_string(), date], |row| {
@@ -602,6 +619,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              GROUP BY e.user_id
              ORDER BY avg_final DESC",
         )?;
@@ -658,6 +676,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              GROUP BY e.user_id
              ORDER BY agg_final DESC";
         let sql_avg = "WITH effective AS (
@@ -683,6 +702,7 @@ impl Database {
              FROM effective e
              JOIN users u ON e.user_id = u.user_id
              WHERE e.rn = 1
+               AND u.banned = 0
              GROUP BY e.user_id
              ORDER BY agg_final DESC";
         let mut stmt = self.conn.prepare(if use_sum { sql_sum } else { sql_avg })?;
@@ -1051,6 +1071,43 @@ impl Database {
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn ban_user(&self, user_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE users SET banned = 1 WHERE user_id = ?1",
+            params![user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn unban_user(&self, user_id: &str) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE users SET banned = 0 WHERE user_id = ?1 AND banned = 1",
+            params![user_id],
+        )
+    }
+
+    pub fn get_banned_users(&self) -> Result<Vec<UserRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT user_id, username FROM users WHERE banned = 1 ORDER BY username",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UserRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn is_user_banned(&self, user_id: u64) -> Result<bool, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE user_id = ?1 AND banned = 1",
+            params![user_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn is_on_hit_list(&self, user_id: u64) -> Result<bool, rusqlite::Error> {

@@ -349,6 +349,52 @@ pub fn handle_admin_cmd(
                 _ => "Unknown action. Use `read`, `add`, or `delete`.".to_string(),
             }
         }
+        "ban_user" => {
+            let Some(user_id) = get_str("user_id") else {
+                return "Missing required parameter: user_id".to_string();
+            };
+            match repo.ban_user(user_id) {
+                Ok(()) => {
+                    let name = repo
+                        .get_banned_users()
+                        .ok()
+                        .and_then(|l| l.into_iter().find(|u| u.user_id == user_id))
+                        .map(|u| u.username)
+                        .unwrap_or_else(|| user_id.to_string());
+                    format!(
+                        "Banned {} ({}). Their scores are stored but hidden from leaderboards \
+                         and the bot will no longer react to their messages.",
+                        name, user_id
+                    )
+                }
+                Err(e) => format!("DB error: {}", e),
+            }
+        }
+        "unban_user" => {
+            let Some(user_id) = get_str("user_id") else {
+                return "Missing required parameter: user_id".to_string();
+            };
+            match repo.unban_user(user_id) {
+                Ok(0) => format!("User `{}` is not currently banned.", user_id),
+                Ok(_) => format!("Unbanned `{}`. Their scores are visible again.", user_id),
+                Err(e) => format!("DB error: {}", e),
+            }
+        }
+        "list_banned" => match repo.get_banned_users() {
+            Ok(list) if list.is_empty() => "No banned users.".to_string(),
+            Ok(list) => {
+                let mut out = format!("**Banned users ({} total)**\n```\n", list.len());
+                out.push_str(&format!("{:<22} {}\n", "User ID", "Username"));
+                out.push_str(&"-".repeat(42));
+                out.push('\n');
+                for row in &list {
+                    out.push_str(&format!("{:<22} {}\n", row.user_id, row.username));
+                }
+                out.push_str("```");
+                truncate_message(out)
+            }
+            Err(e) => format!("DB error: {}", e),
+        },
         _ => "Unknown admin command.".to_string(),
     }
 }

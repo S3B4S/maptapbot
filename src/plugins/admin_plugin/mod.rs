@@ -98,6 +98,26 @@ impl Plugin for AdminPlugin {
                     )
                     .add_option(user_id_option(DiscordCommandOption::IsOptional)),
             },
+            PluginCommand {
+                name: "ban_user",
+                description: "Ban a user (scores stored silently, hidden from leaderboards)",
+                command: CreateCommand::new("ban_user")
+                    .description("Ban a user (scores stored silently, hidden from leaderboards)")
+                    .add_option(user_id_option(DiscordCommandOption::IsRequired)),
+            },
+            PluginCommand {
+                name: "unban_user",
+                description: "Unban a previously banned user",
+                command: CreateCommand::new("unban_user")
+                    .description("Unban a previously banned user")
+                    .add_option(user_id_option(DiscordCommandOption::IsRequired)),
+            },
+            PluginCommand {
+                name: "list_banned",
+                description: "List all banned users",
+                command: CreateCommand::new("list_banned")
+                    .description("List all banned users"),
+            },
         ]
     }
 

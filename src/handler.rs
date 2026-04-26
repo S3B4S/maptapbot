@@ -243,6 +243,18 @@ impl EventHandler for Handler {
                 let _ = msg.react(&ctx.http, '❌').await;
             }
             Some(Ok((_, final_score, mode, score_date))) => {
+                // Banned users: score is stored but the bot goes silent.
+                let is_banned = self
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.is_user_banned(user_id).ok())
+                    .unwrap_or(false);
+
+                if is_banned {
+                    return;
+                }
+
                 // Check if this user is on the hit list and suspiciously good.
                 let on_hit_list = self
                     .db
