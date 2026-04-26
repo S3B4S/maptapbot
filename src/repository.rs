@@ -45,4 +45,9 @@ pub trait Repository: Send + Sync {
     fn get_hit_list(&self) -> Result<Vec<(String, String)>, String>;
     fn add_to_hit_list(&self, id: &str) -> Result<(), String>;
     fn remove_from_hit_list(&self, id: &str) -> Result<usize, String>;
+
+    // ── Admin: ban list ───────────────────────────────────────────────────────
+    fn ban_user(&self, user_id: &str) -> Result<(), String>;
+    fn unban_user(&self, user_id: &str) -> Result<usize, String>;
+    fn get_banned_users(&self) -> Result<Vec<UserRow>, String>;
 }

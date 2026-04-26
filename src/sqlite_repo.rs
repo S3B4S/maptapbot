@@ -134,4 +134,21 @@ impl Repository for SqliteRepository<'_> {
         let db = self.db.lock().unwrap();
         db.remove_from_hit_list(id).map_err(|e| e.to_string())
     }
+
+    // ── Admin: ban list ───────────────────────────────────────────────────────
+
+    fn ban_user(&self, user_id: &str) -> Result<(), String> {
+        let db = self.db.lock().unwrap();
+        db.ban_user(user_id).map_err(|e| e.to_string())
+    }
+
+    fn unban_user(&self, user_id: &str) -> Result<usize, String> {
+        let db = self.db.lock().unwrap();
+        db.unban_user(user_id).map_err(|e| e.to_string())
+    }
+
+    fn get_banned_users(&self) -> Result<Vec<UserRow>, String> {
+        let db = self.db.lock().unwrap();
+        db.get_banned_users().map_err(|e| e.to_string())
+    }
 }
