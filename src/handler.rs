@@ -86,7 +86,7 @@ impl Handler {
         message_id: u64,
         posted_at: DateTime<Utc>,
         content: &str,
-    ) -> Option<Result<(u64, u32, GameMode, NaiveDate), String>> {
+    ) -> Option<Result<(u64, u32, GameMode, NaiveDate, bool), String>> {
         let result = parse_maptap_message(user_id, guild_id, content)
             .or_else(|| parse_challenge_message(user_id, guild_id, content))?;
 
@@ -105,6 +105,7 @@ impl Handler {
                     GameMode::DailyChallenge => "challenge",
                 };
                 let mode = score.mode.clone();
+                let any_nice = score.scores.iter().any(|s| *s == Some(69));
 
                 let db_result = self
                     .db
@@ -127,7 +128,7 @@ impl Handler {
                     mode_label, username, date_str, final_score
                 );
 
-                Ok((user_id, final_score, mode, score_date))
+                Ok((user_id, final_score, mode, score_date, any_nice))
             }
             Err(e) => Err(e),
         })
@@ -242,7 +243,7 @@ impl EventHandler for Handler {
                 warn!("Invalid maptap message from {}: {}", msg.author.name, e);
                 let _ = msg.react(&ctx.http, '❌').await;
             }
-            Some(Ok((_, final_score, mode, score_date))) => {
+            Some(Ok((_, final_score, mode, score_date, any_nice))) => {
                 // Banned users: score is stored but the bot goes silent.
                 let is_banned = self
                     .db
@@ -326,6 +327,12 @@ impl EventHandler for Handler {
                             for reaction in daily_position_reactions(pos) {
                                 let _ = msg.react(&ctx.http, reaction).await;
                             }
+                        }
+                    }
+
+                    if any_nice {
+                        for ch in ['\u{1F1F3}', '\u{1F1EE}', '\u{1F1E8}', '\u{1F1EA}'] {
+                            let _ = msg.react(&ctx.http, ch).await;
                         }
                     }
                 }
