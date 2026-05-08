@@ -11,7 +11,7 @@ use serenity::model::id::{ChannelId, GuildId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option};
+use crate::utils::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option};
 use crate::db::Database;
 use crate::formatting::daily_position_reactions;
 use crate::models::GameMode;

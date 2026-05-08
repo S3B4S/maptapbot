@@ -5,7 +5,7 @@ mod parser;
 mod formatting;
 mod help;
 mod embed;
-mod discord_command_options;
+mod utils;
 mod handler_parse;
 mod pg_db;
 mod handler_pg_sync;
