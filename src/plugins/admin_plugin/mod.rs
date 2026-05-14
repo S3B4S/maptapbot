@@ -6,7 +6,7 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
-use crate::discord_command_options::{DiscordCommandOption, message_id_option, user_id_option};
+use crate::utils::discord_command_options::{DiscordCommandOption, message_id_option, user_id_option};
 use crate::plugin::{Plugin, PluginCommand};
 use crate::repository::Repository;
 
