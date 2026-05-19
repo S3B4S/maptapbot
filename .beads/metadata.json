@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "maptapbot",
+  "project_id": "4598db10-07a1-456e-9662-f499bdebcfb9"
+}
