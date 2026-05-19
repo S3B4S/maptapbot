@@ -12,3 +12,7 @@ dotenvy = "0.15"
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors", "timeout", "set-header"] }
+tower_governor = "0.4"
+serde = { version = "1", features = ["derive"] }

@@ -11,6 +11,8 @@ use serenity::model::id::{ChannelId, GuildId};
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
+use std::sync::Arc;
+
 use crate::utils::discord_command_options::{DiscordCommandOption, channel_id_option, message_id_option};
 use crate::db::Database;
 use crate::formatting::daily_position_reactions;
@@ -21,7 +23,7 @@ use crate::plugin::Plugin;
 use crate::sqlite_repo::SqliteRepository;
 
 pub struct Handler {
-    pub(crate) db: std::sync::Mutex<Database>,
+    pub(crate) db: Arc<std::sync::Mutex<Database>>,
     /// Optional allowlist of channel IDs. When `Some`, only messages from these
     /// channels are parsed. When `None`, all channels are processed.
     pub(crate) channel_ids: Option<Vec<u64>>,
@@ -43,7 +45,7 @@ pub struct Handler {
 
 impl Handler {
     pub fn new(
-        db: Database,
+        db: Arc<std::sync::Mutex<Database>>,
         channel_ids: Option<Vec<u64>>,
         admin_ids: Vec<u64>,
         admin_guild_id: Option<u64>,
@@ -53,7 +55,7 @@ impl Handler {
         plugins: Vec<Box<dyn Plugin>>,
     ) -> Self {
         Self {
-            db: std::sync::Mutex::new(db),
+            db,
             channel_ids,
             admin_ids,
             admin_guild_id,

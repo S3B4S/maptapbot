@@ -1,3 +1,4 @@
+mod api;
 mod db;
 mod handler;
 mod models;
@@ -13,6 +14,8 @@ mod repository;
 mod plugin;
 mod plugins;
 mod sqlite_repo;
+
+use std::sync::{Arc, Mutex};
 
 use handler::Handler;
 use serenity::prelude::*;
@@ -33,7 +36,9 @@ async fn main() {
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set in .env");
 
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "maptap.db".to_string());
-    let db = db::Database::open(&db_path).expect("Failed to open database");
+    let db = Arc::new(Mutex::new(
+        db::Database::open(&db_path).expect("Failed to open database"),
+    ));
     info!("Database initialized at {}", db_path);
 
     // Parse optional comma-separated channel ID allowlist.
@@ -107,6 +112,9 @@ async fn main() {
         Box::new(LeaderboardPlugin::new()),
         Box::new(AdminPlugin::new(db_path.clone())),
     ];
+
+    let api_db = Arc::clone(&db);
+    tokio::spawn(api::serve(api_db));
 
     let mut client = Client::builder(&token, intents)
         .event_handler(Handler::new(db, channel_ids, admin_ids, admin_guild_id, logging_channel_id, db_path, pg_url, plugins))
