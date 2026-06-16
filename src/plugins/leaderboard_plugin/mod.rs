@@ -14,7 +14,8 @@ use serenity::model::id::{ChannelId, MessageId};
 use tracing::{error, warn};
 
 use crate::embed::{
-    build_full_embed, build_summary_embed, build_weekly_full_embed, build_weekly_summary_embed,
+    build_frontier_full_embed, build_frontier_summary_embed, build_full_embed,
+    build_summary_embed, build_weekly_full_embed, build_weekly_summary_embed,
 };
 use crate::formatting::leaderboard_title;
 use crate::parser::parse_date_str;
@@ -173,6 +174,19 @@ impl LeaderboardPlugin {
                     error!("DB error: {}", e);
                     Err("Internal error fetching leaderboard.".to_string())
                 }),
+            "leaderboard_frontier" => repo
+                .get_frontier_leaderboard(gid)
+                .map(|rows| {
+                    if rows.is_empty() {
+                        Err("No Frontier scores recorded yet!".to_string())
+                    } else {
+                        Ok(build_frontier_summary_embed("Frontier Leaderboard", &rows))
+                    }
+                })
+                .unwrap_or_else(|e| {
+                    error!("DB error: {}", e);
+                    Err("Internal error fetching leaderboard.".to_string())
+                }),
             _ => Err("Unknown leaderboard command.".to_string()),
         }
     }
@@ -184,6 +198,17 @@ impl LeaderboardPlugin {
         date: Option<NaiveDate>,
         repo: &dyn Repository,
     ) -> Result<CreateEmbed, String> {
+        if name == "leaderboard_frontier" {
+            let rows = repo.get_frontier_leaderboard(gid).map_err(|e| {
+                error!("DB error: {}", e);
+                "Internal error fetching leaderboard.".to_string()
+            })?;
+            if rows.is_empty() {
+                return Err("No scores to display.".to_string());
+            }
+            return Ok(build_frontier_full_embed("Frontier Leaderboard — Full", &rows));
+        }
+
         let (title, rows, is_permanent, is_challenge, resolved_date) = match name {
             "leaderboard_daily" => {
                 let d = date.unwrap_or_else(|| Utc::now().date_naive());
@@ -1020,6 +1045,12 @@ impl Plugin for LeaderboardPlugin {
                 command: CreateCommand::new("leaderboard_challenge_permanent")
                     .description("Show the all-time challenge leaderboard for this server"),
             },
+            PluginCommand {
+                name: "leaderboard_frontier",
+                description: "Show the all-time Frontier leaderboard for this server",
+                command: CreateCommand::new("leaderboard_frontier")
+                    .description("Show the all-time Frontier leaderboard for this server"),
+            },
         ]
     }
 
@@ -1056,7 +1087,8 @@ impl Plugin for LeaderboardPlugin {
                 self.handle_weekly(ctx, cmd, gid, invoker_id, repo).await;
             }
             name @ ("leaderboard_permanent"
-            | "leaderboard_challenge_permanent") => {
+            | "leaderboard_challenge_permanent"
+            | "leaderboard_frontier") => {
                 self.handle_permanent(ctx, cmd, name, gid, invoker_id, repo)
                     .await;
             }
@@ -1094,6 +1126,7 @@ fn cmd_name_key(name: &str) -> &'static str {
         "leaderboard_challenge_daily" => "leaderboard_challenge_daily",
         "leaderboard_challenge_permanent" => "leaderboard_challenge_permanent",
         "leaderboard_weekly" => "leaderboard_weekly",
+        "leaderboard_frontier" => "leaderboard_frontier",
         _ => unreachable!("cmd_name_key called with unexpected name: {}", name),
     }
 }

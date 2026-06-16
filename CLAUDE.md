@@ -24,6 +24,7 @@ Plugin-local specs live alongside the plugin (e.g. `src/plugins/self_plugin/self
 | `specs/parse.md` | General message parsing rules |
 | `specs/daily_mode.md` | Daily score format and validation |
 | `specs/challenge_mode.md` | Challenge score format and validation |
+| `specs/frontier_mode.md` | Frontier (endless mode) score format, validation, and leaderboard |
 | `specs/admin.md` | Admin commands behavior |
 | `specs/leaderboard_daily_date_params.md` | Date parameter handling for leaderboards |
 | `specs/leaderboard_weekly.md` | `/leaderboard_weekly` command — week/scoring params, embed format, buttons |

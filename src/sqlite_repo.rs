@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use crate::db::{Database, DbStats, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot, UserRow};
+use crate::db::{Database, DbStats, FrontierLeaderboardRow, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot, UserRow};
 use crate::repository::Repository;
 
 pub struct SqliteRepository<'a> {
@@ -55,6 +55,11 @@ impl Repository for SqliteRepository<'_> {
     fn get_weekly_leaderboard(&self, guild_id: u64, week_start: &str, week_end: &str, use_sum: bool) -> Result<Vec<LeaderboardRow>, String> {
         let db = self.db.lock().unwrap();
         db.get_weekly_leaderboard(guild_id, week_start, week_end, use_sum).map_err(|e| e.to_string())
+    }
+
+    fn get_frontier_leaderboard(&self, guild_id: u64) -> Result<Vec<FrontierLeaderboardRow>, String> {
+        let db = self.db.lock().unwrap();
+        db.get_frontier_leaderboard(guild_id).map_err(|e| e.to_string())
     }
 
     // ── Admin: score management ──────────────────────────────────────────────

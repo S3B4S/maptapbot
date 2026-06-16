@@ -16,6 +16,9 @@ fn make_score(scores: [Option<u32>; 5], final_score: u32) -> MaptapScore {
         final_score,
         raw_message: String::new(),
         posted_at: Utc::now(),
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     }
 }
 
@@ -85,6 +88,9 @@ fn test_none_score_valid_in_challenge_mode() {
         final_score: 509,
         raw_message: String::new(),
         posted_at: Utc::now(),
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     };
     assert!(s.validate().is_ok());
     assert_eq!(s.compute_final_score(), 509);
@@ -105,7 +111,84 @@ fn test_none_score_invalid_in_daily_default() {
         final_score: 0,
         raw_message: String::new(),
         posted_at: Utc::now(),
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     };
     let err = s.validate().unwrap_err();
     assert!(err.contains("challenge mode"));
+}
+
+// ── Frontier mode ────────────────────────────────────────────
+
+fn make_frontier_score() -> MaptapScore {
+    MaptapScore {
+        message_id: 1,
+        channel_id: 1,
+        channel_parent_id: None,
+        user_id: 1,
+        guild_id: Some(100),
+        mode: GameMode::Frontier,
+        time_spent_ms: Some(197_000),
+        date: NaiveDate::from_ymd_opt(2026, 4, 13).unwrap(),
+        scores: [None, None, None, None, None],
+        final_score: 2829,
+        raw_message: String::new(),
+        posted_at: Utc::now(),
+        frontier_level: Some(8),
+        frontier_rounds: Some(31),
+        frontier_location: Some("Kurnool, Andhra Pradesh, India".to_string()),
+    }
+}
+
+#[test]
+fn test_frontier_valid_above_1000() {
+    let s = make_frontier_score();
+    assert!(s.validate().is_ok());
+}
+
+#[test]
+fn test_frontier_rejects_per_tile_scores() {
+    let mut s = make_frontier_score();
+    s.scores = [Some(50), None, None, None, None];
+    let err = s.validate().unwrap_err();
+    assert!(err.contains("per-tile"));
+}
+
+#[test]
+fn test_frontier_requires_level() {
+    let mut s = make_frontier_score();
+    s.frontier_level = None;
+    let err = s.validate().unwrap_err();
+    assert!(err.contains("level"));
+}
+
+#[test]
+fn test_frontier_requires_location() {
+    let mut s = make_frontier_score();
+    s.frontier_location = None;
+    let err = s.validate().unwrap_err();
+    assert!(err.contains("location"));
+}
+
+#[test]
+fn test_frontier_rejects_empty_location() {
+    let mut s = make_frontier_score();
+    s.frontier_location = Some("   ".to_string());
+    let err = s.validate().unwrap_err();
+    assert!(err.contains("non-empty"));
+}
+
+#[test]
+fn test_frontier_requires_time() {
+    let mut s = make_frontier_score();
+    s.time_spent_ms = None;
+    let err = s.validate().unwrap_err();
+    assert!(err.contains("time_spent_ms"));
+}
+
+#[test]
+fn test_frontier_game_mode_round_trip() {
+    assert_eq!(GameMode::from_str("frontier"), Some(GameMode::Frontier));
+    assert_eq!(GameMode::Frontier.as_str(), "frontier");
 }

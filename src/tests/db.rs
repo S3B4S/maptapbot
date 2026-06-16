@@ -36,6 +36,9 @@ fn make_score(
         final_score,
         raw_message: "test".to_string(),
         posted_at: Utc::now(),
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     }
 }
 
@@ -60,6 +63,37 @@ fn insert_score(
         GameMode::DailyDefault,
         None,
     );
+    let msg_id = score.message_id;
+    db.insert_score(&score).unwrap();
+    msg_id
+}
+
+/// Helper: upsert user then frontier-mode score.
+fn insert_frontier_score(
+    db: &Database,
+    user_id: u64,
+    guild_id: u64,
+    day: u32,
+    final_score: u32,
+    level: u32,
+    rounds: u32,
+    location: &str,
+    time_spent_ms: u32,
+) -> u64 {
+    db.upsert_user(user_id, &format!("user{}", user_id))
+        .unwrap();
+    let mut score = make_score(
+        user_id,
+        guild_id,
+        day,
+        [None, None, None, None, None],
+        final_score,
+        GameMode::Frontier,
+        Some(time_spent_ms),
+    );
+    score.frontier_level = Some(level);
+    score.frontier_rounds = Some(rounds);
+    score.frontier_location = Some(location.to_string());
     let msg_id = score.message_id;
     db.insert_score(&score).unwrap();
     msg_id
@@ -698,4 +732,119 @@ fn test_list_scores_includes_message_id() {
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].message_id.starts_with("legacy-"));
     assert_eq!(rows[0].channel_id, Some("500".to_string()));
+}
+
+// ── Frontier leaderboard ─────────────────────────────────────
+
+#[test]
+fn test_frontier_leaderboard_best_run_per_user() {
+    let db = test_db();
+    let gid = 100;
+    // Alice has 3 runs — best is 2829.
+    insert_frontier_score(&db, 1, gid, 1, 1500, 5, 18, "Paris", 100_000);
+    insert_frontier_score(&db, 1, gid, 1, 2829, 8, 31, "Kurnool", 197_000);
+    insert_frontier_score(&db, 1, gid, 2, 2100, 7, 25, "Tokyo", 150_000);
+    // Bob has 1 run.
+    insert_frontier_score(&db, 2, gid, 1, 1800, 6, 22, "Lagos", 120_000);
+
+    let rows = db.get_frontier_leaderboard(gid).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].user_id, "1");
+    assert_eq!(rows[0].final_score, 2829);
+    assert_eq!(rows[0].frontier_level, Some(8));
+    assert_eq!(rows[0].frontier_rounds, Some(31));
+    assert_eq!(
+        rows[0].frontier_location.as_deref(),
+        Some("Kurnool")
+    );
+    assert_eq!(rows[1].user_id, "2");
+    assert_eq!(rows[1].final_score, 1800);
+}
+
+#[test]
+fn test_frontier_leaderboard_excludes_other_modes() {
+    let db = test_db();
+    let gid = 100;
+    insert_score(&db, 1, gid, 1, [Some(93), Some(90), Some(83), Some(61), Some(97)], 823);
+    insert_challenge_score(&db, 1, gid, 1, [Some(89), Some(82), Some(94), Some(88), Some(97)], 914, 21100);
+    insert_frontier_score(&db, 1, gid, 1, 2829, 8, 31, "Kurnool", 197_000);
+
+    let rows = db.get_frontier_leaderboard(gid).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].final_score, 2829);
+}
+
+#[test]
+fn test_frontier_leaderboard_tiebreak_earlier_wins() {
+    let db = test_db();
+    let gid = 100;
+    db.upsert_user(1, "user1").unwrap();
+    db.upsert_user(2, "user2").unwrap();
+
+    // Two users tied on final_score; user1 posted earlier than user2.
+    let mut a = make_score(1, gid, 1, [None; 5], 1500, GameMode::Frontier, Some(100_000));
+    a.frontier_level = Some(5);
+    a.frontier_rounds = Some(18);
+    a.frontier_location = Some("Paris".into());
+    a.posted_at = chrono::DateTime::parse_from_rfc3339("2026-04-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut b = make_score(2, gid, 1, [None; 5], 1500, GameMode::Frontier, Some(110_000));
+    b.frontier_level = Some(5);
+    b.frontier_rounds = Some(18);
+    b.frontier_location = Some("Lagos".into());
+    b.posted_at = chrono::DateTime::parse_from_rfc3339("2026-04-02T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    db.insert_score(&a).unwrap();
+    db.insert_score(&b).unwrap();
+
+    let rows = db.get_frontier_leaderboard(gid).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].user_id, "1", "earlier post wins the tiebreak");
+    assert_eq!(rows[1].user_id, "2");
+}
+
+#[test]
+fn test_frontier_leaderboard_excludes_invalid_rows() {
+    let db = test_db();
+    let gid = 100;
+    let msg_id = insert_frontier_score(&db, 1, gid, 1, 2829, 8, 31, "Kurnool", 197_000);
+    insert_frontier_score(&db, 1, gid, 1, 1500, 5, 18, "Paris", 100_000);
+    // Invalidate the best run — second-best should now be the user's best.
+    db.invalidate_score(&msg_id.to_string()).unwrap();
+
+    let rows = db.get_frontier_leaderboard(gid).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].final_score, 1500);
+}
+
+#[test]
+fn test_frontier_leaderboard_excludes_banned_users() {
+    let db = test_db();
+    let gid = 100;
+    insert_frontier_score(&db, 1, gid, 1, 2829, 8, 31, "Kurnool", 197_000);
+    insert_frontier_score(&db, 2, gid, 1, 1800, 6, 22, "Lagos", 120_000);
+    db.ban_user("1").unwrap();
+
+    let rows = db.get_frontier_leaderboard(gid).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].user_id, "2");
+}
+
+#[test]
+fn test_frontier_leaderboard_guild_scoping() {
+    let db = test_db();
+    insert_frontier_score(&db, 1, 100, 1, 2829, 8, 31, "Kurnool", 197_000);
+    insert_frontier_score(&db, 2, 200, 1, 5000, 12, 50, "Oslo", 300_000);
+
+    let g100 = db.get_frontier_leaderboard(100).unwrap();
+    assert_eq!(g100.len(), 1);
+    assert_eq!(g100[0].final_score, 2829);
+
+    let g200 = db.get_frontier_leaderboard(200).unwrap();
+    assert_eq!(g200.len(), 1);
+    assert_eq!(g200[0].final_score, 5000);
 }

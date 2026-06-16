@@ -28,6 +28,9 @@ struct SyncScoreRow {
     created_at: Option<String>,
     posted_at: String,
     invalid: bool,
+    frontier_level: Option<i64>,
+    frontier_rounds: Option<i64>,
+    frontier_location: Option<String>,
 }
 
 /// Full stats_snapshots row for PostgreSQL sync.
@@ -50,7 +53,8 @@ fn dump_scores(conn: &rusqlite::Connection) -> Result<Vec<SyncScoreRow>, rusqlit
         "SELECT message_id, channel_id, channel_parent_id,
                 user_id, guild_id, date, mode, time_spent_ms,
                 score1, score2, score3, score4, score5,
-                final_score, raw_message, created_at, posted_at, invalid
+                final_score, raw_message, created_at, posted_at, invalid,
+                frontier_level, frontier_rounds, frontier_location
          FROM scores ORDER BY posted_at",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -73,6 +77,9 @@ fn dump_scores(conn: &rusqlite::Connection) -> Result<Vec<SyncScoreRow>, rusqlit
             created_at: row.get(15)?,
             posted_at: row.get(16)?,
             invalid: row.get::<_, i64>(17)? != 0,
+            frontier_level: row.get(18)?,
+            frontier_rounds: row.get(19)?,
+            frontier_location: row.get(20)?,
         })
     })?;
     rows.collect()
@@ -185,8 +192,14 @@ pub async fn sync_sqlite_to_postgres(db: &Mutex<Database>, pg_url: &str) -> Stri
             raw_message       TEXT,
             created_at        TEXT,
             posted_at         TEXT NOT NULL,
-            invalid           BIGINT NOT NULL DEFAULT 0
+            invalid           BIGINT NOT NULL DEFAULT 0,
+            frontier_level    BIGINT,
+            frontier_rounds   BIGINT,
+            frontier_location TEXT
         );
+        ALTER TABLE scores ADD COLUMN IF NOT EXISTS frontier_level    BIGINT;
+        ALTER TABLE scores ADD COLUMN IF NOT EXISTS frontier_rounds   BIGINT;
+        ALTER TABLE scores ADD COLUMN IF NOT EXISTS frontier_location TEXT;
         CREATE TABLE IF NOT EXISTS stats_snapshots (
             user_id               TEXT PRIMARY KEY,
             taken_at              TEXT NOT NULL,
@@ -242,8 +255,9 @@ pub async fn sync_sqlite_to_postgres(db: &Mutex<Database>, pg_url: &str) -> Stri
                      message_id, channel_id, channel_parent_id,
                      user_id, guild_id, date, mode, time_spent_ms,
                      score1, score2, score3, score4, score5,
-                     final_score, raw_message, created_at, posted_at, invalid
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                     final_score, raw_message, created_at, posted_at, invalid,
+                     frontier_level, frontier_rounds, frontier_location
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                  ON CONFLICT (message_id) DO NOTHING",
                 &[
                     &row.message_id,
@@ -264,6 +278,9 @@ pub async fn sync_sqlite_to_postgres(db: &Mutex<Database>, pg_url: &str) -> Stri
                     &row.created_at,
                     &row.posted_at,
                     &invalid_val,
+                    &row.frontier_level,
+                    &row.frontier_rounds,
+                    &row.frontier_location,
                 ],
             )
             .await
