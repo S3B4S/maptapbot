@@ -38,6 +38,9 @@ pub struct ScoreRow {
     pub time_spent_ms: Option<i64>,
     pub posted_at: String,
     pub invalid: bool,
+    pub frontier_level: Option<i64>,
+    pub frontier_rounds: Option<i64>,
+    pub frontier_location: Option<String>,
 }
 
 /// Row returned by list_users.
@@ -118,6 +121,9 @@ impl Database {
                 created_at    TEXT DEFAULT (datetime('now')),
                 posted_at     TEXT NOT NULL DEFAULT (datetime('now')),
                 invalid       INTEGER NOT NULL DEFAULT 0,
+                frontier_level    INTEGER,
+                frontier_rounds   INTEGER,
+                frontier_location TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
@@ -377,6 +383,23 @@ impl Database {
                 .execute_batch("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0;")?;
         }
 
+        // Migration 7: add Frontier mode columns to `scores`.
+        let has_frontier_level: bool = {
+            let mut stmt = self.conn.prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('scores') WHERE name = 'frontier_level'",
+            )?;
+            let count: i64 = stmt.query_row([], |row| row.get(0))?;
+            count > 0
+        };
+
+        if !has_frontier_level {
+            self.conn.execute_batch(
+                "ALTER TABLE scores ADD COLUMN frontier_level INTEGER;
+                 ALTER TABLE scores ADD COLUMN frontier_rounds INTEGER;
+                 ALTER TABLE scores ADD COLUMN frontier_location TEXT;",
+            )?;
+        }
+
         // Effective-row index — created after all migrations have ensured the
         // `invalid` column exists. Idempotent so safe to run on every open.
         self.conn.execute_batch(
@@ -413,8 +436,10 @@ impl Database {
                  (message_id, channel_id, channel_parent_id,
                   user_id, guild_id, date, mode, time_spent_ms,
                   score1, score2, score3, score4, score5,
-                  final_score, raw_message, posted_at, invalid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)
+                  final_score, raw_message, posted_at, invalid,
+                  frontier_level, frontier_rounds, frontier_location)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0,
+                     ?17, ?18, ?19)
              ON CONFLICT(message_id) DO UPDATE SET
                 channel_id        = excluded.channel_id,
                 channel_parent_id = excluded.channel_parent_id,
@@ -427,6 +452,9 @@ impl Database {
                 time_spent_ms     = excluded.time_spent_ms,
                 raw_message       = excluded.raw_message,
                 posted_at         = excluded.posted_at,
+                frontier_level    = excluded.frontier_level,
+                frontier_rounds   = excluded.frontier_rounds,
+                frontier_location = excluded.frontier_location,
                 created_at        = datetime('now')",
             params![
                 score.message_id.to_string(),
@@ -445,6 +473,9 @@ impl Database {
                 score.final_score,
                 score.raw_message,
                 posted_at_str,
+                score.frontier_level.map(|v| v as i64),
+                score.frontier_rounds.map(|v| v as i64),
+                score.frontier_location.as_deref(),
             ],
         )?;
         Ok(())
@@ -737,7 +768,8 @@ impl Database {
                     s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid,
+                    s.frontier_level, s.frontier_rounds, s.frontier_location
              FROM scores s
              LEFT JOIN users u ON s.user_id = u.user_id
              WHERE s.message_id = ?1",
@@ -761,6 +793,9 @@ impl Database {
                 time_spent_ms: row.get(14)?,
                 posted_at: row.get(15)?,
                 invalid: row.get::<_, i64>(16)? != 0,
+                frontier_level: row.get(17)?,
+                frontier_rounds: row.get(18)?,
+                frontier_location: row.get(19)?,
             })
         })?;
         rows.next().transpose()
@@ -793,7 +828,8 @@ impl Database {
                     s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid,
+                    s.frontier_level, s.frontier_rounds, s.frontier_location
              FROM scores s
              LEFT JOIN users u ON s.user_id = u.user_id
              WHERE s.user_id = ?1
@@ -818,6 +854,9 @@ impl Database {
                 time_spent_ms: row.get(14)?,
                 posted_at: row.get(15)?,
                 invalid: row.get::<_, i64>(16)? != 0,
+                frontier_level: row.get(17)?,
+                frontier_rounds: row.get(18)?,
+                frontier_location: row.get(19)?,
             })
         })?;
         rows.collect()
@@ -830,7 +869,8 @@ impl Database {
                     s.user_id, COALESCE(u.username, s.user_id) as username,
                     s.guild_id, s.date, s.mode,
                     s.score1, s.score2, s.score3, s.score4, s.score5,
-                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid
+                    s.final_score, s.time_spent_ms, s.posted_at, s.invalid,
+                    s.frontier_level, s.frontier_rounds, s.frontier_location
              FROM scores s
              LEFT JOIN users u ON s.user_id = u.user_id
              ORDER BY s.date DESC, s.user_id, s.mode, s.posted_at DESC",
@@ -854,6 +894,9 @@ impl Database {
                 time_spent_ms: row.get(14)?,
                 posted_at: row.get(15)?,
                 invalid: row.get::<_, i64>(16)? != 0,
+                frontier_level: row.get(17)?,
+                frontier_rounds: row.get(18)?,
+                frontier_location: row.get(19)?,
             })
         })?;
         rows.collect()

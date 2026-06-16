@@ -17,7 +17,7 @@ use crate::utils::discord_command_options::{DiscordCommandOption, channel_id_opt
 use crate::db::Database;
 use crate::formatting::daily_position_reactions;
 use crate::models::GameMode;
-use crate::parser::{parse_challenge_message, parse_maptap_message};
+use crate::parser::{parse_challenge_message, parse_frontier_message, parse_maptap_message};
 use crate::help::build_help_text;
 use crate::plugin::Plugin;
 use crate::sqlite_repo::SqliteRepository;
@@ -90,7 +90,8 @@ impl Handler {
         content: &str,
     ) -> Option<Result<(u64, u32, GameMode, NaiveDate, bool), String>> {
         let result = parse_maptap_message(user_id, guild_id, content)
-            .or_else(|| parse_challenge_message(user_id, guild_id, content))?;
+            .or_else(|| parse_challenge_message(user_id, guild_id, content))
+            .or_else(|| parse_frontier_message(user_id, guild_id, content))?;
 
         Some(match result {
             Ok(mut score) => {
@@ -98,6 +99,10 @@ impl Handler {
                 score.channel_id = channel_id;
                 score.channel_parent_id = channel_parent_id;
                 score.posted_at = posted_at;
+                // Frontier messages contain no date — derive it from posted_at.
+                if score.mode == GameMode::Frontier {
+                    score.date = posted_at.date_naive();
+                }
 
                 let score_date = score.date;
                 let date_str = score_date.format("%Y-%m-%d").to_string();
@@ -105,6 +110,7 @@ impl Handler {
                 let mode_label = match score.mode {
                     GameMode::DailyDefault => "default",
                     GameMode::DailyChallenge => "challenge",
+                    GameMode::Frontier => "frontier",
                 };
                 let mode = score.mode.clone();
                 let any_nice = score.scores.iter().any(|s| *s == Some(69));
@@ -311,7 +317,10 @@ impl EventHandler for Handler {
                     let _ = msg.react(&ctx.http, '🗺').await;
 
                     // React with an additional emoji reflecting the player's daily rank.
-                    if let Some(gid) = guild_id {
+                    // Frontier has no daily leaderboard, so skip the position reaction for it.
+                    if mode != GameMode::Frontier
+                        && let Some(gid) = guild_id
+                    {
                         let date_str = score_date.format("%Y-%m-%d").to_string();
                         let uid_str = user_id.to_string();
                         let pos = self.db.lock().ok().and_then(|db| {
@@ -322,6 +331,7 @@ impl EventHandler for Handler {
                                 GameMode::DailyChallenge => {
                                     db.get_daily_challenge_leaderboard(gid, &date_str).ok()?
                                 }
+                                GameMode::Frontier => return None,
                             };
                             rows.iter().position(|r| r.user_id == uid_str).map(|i| i + 1)
                         });

@@ -36,6 +36,9 @@ fn make_score(
         final_score,
         raw_message: "test".to_string(),
         posted_at: Utc::now(),
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     }
 }
 

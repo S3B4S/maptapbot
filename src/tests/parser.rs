@@ -376,3 +376,116 @@ fn test_challenge_tomorrow_date_accepted() {
         "tomorrow's date should be accepted"
     );
 }
+
+// ── Frontier mode ────────────────────────────────────────────
+
+const FRONTIER_MSG: &str = "MapTap Frontier
+Level 8 · 31 rounds · 3:17
+Fell at Kurnool, Andhra Pradesh, India · 2,829 pts
+www.maptap.gg/frontier";
+
+#[test]
+fn test_frontier_valid_message() {
+    let result = parse_frontier_message(12345, G, FRONTIER_MSG);
+    let score = result.unwrap().unwrap();
+    assert_eq!(score.mode, GameMode::Frontier);
+    assert_eq!(score.final_score, 2829);
+    assert_eq!(score.frontier_level, Some(8));
+    assert_eq!(score.frontier_rounds, Some(31));
+    assert_eq!(
+        score.frontier_location.as_deref(),
+        Some("Kurnool, Andhra Pradesh, India")
+    );
+    assert_eq!(score.time_spent_ms, Some(197_000));
+    assert_eq!(score.scores, [None, None, None, None, None]);
+}
+
+#[test]
+fn test_frontier_not_frontier() {
+    assert!(parse_frontier_message(1, G, "hello world").is_none());
+}
+
+#[test]
+fn test_frontier_daily_message_returns_none() {
+    let msg = "www.maptap.gg April 13\n93🏆 90👑 83😁 61🫢 97🔥\nFinal score: 823";
+    assert!(parse_frontier_message(1, G, msg).is_none());
+}
+
+#[test]
+fn test_frontier_text_before() {
+    let msg = format!("welp\n{}", FRONTIER_MSG);
+    let score = parse_frontier_message(1, G, &msg).unwrap().unwrap();
+    assert_eq!(score.final_score, 2829);
+}
+
+#[test]
+fn test_frontier_text_after() {
+    let msg = format!("{}\nnot bad", FRONTIER_MSG);
+    let score = parse_frontier_message(1, G, &msg).unwrap().unwrap();
+    assert_eq!(score.final_score, 2829);
+}
+
+#[test]
+fn test_frontier_above_1000_pts() {
+    // Confirm the 1000 cap is lifted (2829 > 1000).
+    let score = parse_frontier_message(1, G, FRONTIER_MSG).unwrap().unwrap();
+    assert!(score.final_score > 1000);
+    assert!(score.validate().is_ok());
+}
+
+#[test]
+fn test_frontier_pts_without_comma() {
+    let msg = "MapTap Frontier
+Level 3 · 9 rounds · 0:45
+Fell at Paris, France · 412 pts
+www.maptap.gg/frontier";
+    let score = parse_frontier_message(1, G, msg).unwrap().unwrap();
+    assert_eq!(score.final_score, 412);
+    assert_eq!(score.time_spent_ms, Some(45_000));
+}
+
+#[test]
+fn test_frontier_multiword_location_with_punctuation() {
+    let msg = "MapTap Frontier
+Level 12 · 50 rounds · 5:00
+Fell at St. John's, Newfoundland & Labrador · 5,001 pts
+www.maptap.gg/frontier";
+    let score = parse_frontier_message(1, G, msg).unwrap().unwrap();
+    assert_eq!(score.final_score, 5001);
+    assert_eq!(
+        score.frontier_location.as_deref(),
+        Some("St. John's, Newfoundland & Labrador")
+    );
+}
+
+#[test]
+fn test_frontier_bad_stats_line() {
+    let msg = "MapTap Frontier
+not the right shape
+Fell at Paris, France · 412 pts
+www.maptap.gg/frontier";
+    let result = parse_frontier_message(1, G, msg);
+    assert!(result.is_some());
+    assert!(result.unwrap().is_err());
+}
+
+#[test]
+fn test_frontier_bad_location_line() {
+    let msg = "MapTap Frontier
+Level 3 · 9 rounds · 0:45
+something something 412 pts
+www.maptap.gg/frontier";
+    let result = parse_frontier_message(1, G, msg);
+    assert!(result.is_some());
+    assert!(result.unwrap().is_err());
+}
+
+#[test]
+fn test_frontier_missing_header() {
+    let msg = "MapTap Frontiers
+Level 3 · 9 rounds · 0:45
+Fell at Paris, France · 412 pts
+www.maptap.gg/frontier";
+    assert!(parse_frontier_message(1, G, msg).is_none());
+}
+

@@ -77,6 +77,9 @@ pub fn parse_maptap_message(
         final_score,
         raw_message,
         posted_at: Utc::now(), // Overwritten by caller from Discord message metadata
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     };
 
     Some(score.validate().map(|_| score))
@@ -167,9 +170,146 @@ pub fn parse_challenge_message(
         final_score,
         raw_message,
         posted_at: Utc::now(), // Overwritten by caller from Discord message metadata
+        frontier_level: None,
+        frontier_rounds: None,
+        frontier_location: None,
     };
 
     Some(score.validate().map(|_| score))
+}
+
+/// Attempt to parse a maptap frontier-mode score message.
+///
+/// The 4-line frontier block format (URL is on line 4, unlike daily/challenge):
+/// ```
+/// MapTap Frontier
+/// Level 8 · 31 rounds · 3:17
+/// Fell at Kurnool, Andhra Pradesh, India · 2,829 pts
+/// www.maptap.gg/frontier
+/// ```
+///
+/// The Frontier message has no date — the caller derives `date` from the
+/// Discord `posted_at` timestamp after this returns. This function sets
+/// `date` to a placeholder.
+///
+/// Returns None if the message doesn't look like a frontier block.
+/// Returns Some(Err) if it looks like a frontier block but has validation issues.
+/// Returns Some(Ok) if parsing and validation both succeed.
+pub fn parse_frontier_message(
+    user_id: u64,
+    guild_id: Option<u64>,
+    content: &str,
+) -> Option<Result<MaptapScore, String>> {
+    let lines: Vec<&str> = content.trim().lines().collect();
+    if lines.len() < 4 {
+        return None;
+    }
+
+    // Find the URL line — must be exact (after trim).
+    let mut url_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "www.maptap.gg/frontier" {
+            url_idx = Some(i);
+            break;
+        }
+    }
+    let url_idx = url_idx?;
+
+    // Need at least 3 lines before the URL.
+    if url_idx < 3 {
+        return None;
+    }
+
+    let header_line = lines[url_idx - 3].trim();
+    let stats_line = lines[url_idx - 2].trim();
+    let location_line = lines[url_idx - 1].trim();
+
+    if header_line != "MapTap Frontier" {
+        return None;
+    }
+
+    let (level, rounds, time_spent_ms) = match parse_frontier_stats_line(stats_line) {
+        Some(v) => v,
+        None => return Some(Err("Failed to parse Frontier stats line".to_string())),
+    };
+
+    let (location, final_score) = match parse_frontier_location_line(location_line) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let raw_message = format!(
+        "{}\n{}\n{}\nwww.maptap.gg/frontier",
+        header_line, stats_line, location_line
+    );
+    let score = MaptapScore {
+        message_id: 0,
+        channel_id: 0,
+        channel_parent_id: None,
+        user_id,
+        guild_id,
+        mode: GameMode::Frontier,
+        time_spent_ms: Some(time_spent_ms),
+        // Placeholder — overwritten by caller from Discord `posted_at`.
+        date: Utc::now().date_naive(),
+        scores: [None, None, None, None, None],
+        final_score,
+        raw_message,
+        posted_at: Utc::now(),
+        frontier_level: Some(level),
+        frontier_rounds: Some(rounds),
+        frontier_location: Some(location),
+    };
+
+    Some(score.validate().map(|_| score))
+}
+
+/// Parse "Level <N> · <M> rounds · <M>:<SS>" → (level, rounds, time_spent_ms).
+/// The separator is " · " (U+00B7 MIDDLE DOT surrounded by spaces).
+fn parse_frontier_stats_line(line: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = line.split(" \u{00B7} ").collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let level: u32 = parts[0].strip_prefix("Level ")?.parse().ok()?;
+    let rounds: u32 = parts[1].strip_suffix(" rounds")?.parse().ok()?;
+
+    let (m_str, s_str) = parts[2].split_once(':')?;
+    let minutes: u32 = m_str.parse().ok()?;
+    let seconds: u32 = s_str.parse().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
+    let time_ms = (minutes * 60 + seconds) * 1000;
+
+    Some((level, rounds, time_ms))
+}
+
+/// Parse "Fell at <location> · <N,NNN> pts" → (location, final_score).
+fn parse_frontier_location_line(line: &str) -> Result<(String, u32), String> {
+    let rest = line
+        .strip_prefix("Fell at ")
+        .ok_or_else(|| "Expected line starting with 'Fell at '".to_string())?;
+
+    // Split on the FINAL " · " — locations may legitimately contain other punctuation,
+    // but the pts segment is always last.
+    let sep = " \u{00B7} ";
+    let sep_idx = rest
+        .rfind(sep)
+        .ok_or_else(|| "Expected ' · <pts> pts' suffix on Fell-at line".to_string())?;
+    let location = rest[..sep_idx].trim().to_string();
+    let pts_segment = &rest[sep_idx + sep.len()..];
+
+    let pts_str = pts_segment
+        .strip_suffix(" pts")
+        .ok_or_else(|| "Expected ' pts' suffix on Fell-at line".to_string())?;
+    let final_score: u32 = pts_str
+        .replace(',', "")
+        .parse()
+        .map_err(|e| format!("Failed to parse pts '{}': {}", pts_str, e))?;
+
+    Ok((location, final_score))
 }
 
 /// Parse challenge header: "⚡ MapTap Challenge Round - Apr 12"
