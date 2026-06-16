@@ -3,10 +3,14 @@
 use chrono::NaiveDate;
 use serenity::all::CreateEmbed;
 
-use crate::{db::LeaderboardRow, formatting::truncate_username};
+use crate::{
+    db::{FrontierLeaderboardRow, LeaderboardRow},
+    formatting::truncate_username,
+};
 
 const COLOR_GOLD: u32 = 0xFFD700;
 const COLOR_ELECTRIC_BLUE: u32 = 0x4A90E2;
+const COLOR_FRONTIER_ORANGE: u32 = 0xFF6B35;
 
 const MEDALS: [&str; 3] = ["\u{1f947}", "\u{1f948}", "\u{1f949}"]; // 🥇🥈🥉
 const SKULL: &str = "\u{1f480}"; // 💀
@@ -290,4 +294,133 @@ pub fn build_full_embed(
         .title(title)
         .color(color)
         .description(full_desc)
+}
+
+// ── Frontier embeds ───────────────────────────────────────────────────────
+
+/// Format a comma-separated integer (e.g. `2829` → `"2,829"`).
+fn fmt_thousands(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let chars: Vec<char> = s.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*c);
+    }
+    if n < 0 {
+        format!("-{}", out)
+    } else {
+        out
+    }
+}
+
+/// Format `time_spent_ms` as M:SS — Frontier runs are minutes, not seconds.
+fn fmt_frontier_time(ms: Option<i64>) -> String {
+    let total_seconds = ms.unwrap_or(0) / 1000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{}:{:02}", minutes, seconds)
+}
+
+fn format_frontier_entry(emoji: &str, row: &FrontierLeaderboardRow) -> String {
+    let name = truncate_username(&row.username, 20);
+    let pts = fmt_thousands(row.final_score);
+    let level = row.frontier_level.unwrap_or(0);
+    let rounds = row.frontier_rounds.unwrap_or(0);
+    let time = fmt_frontier_time(row.time_spent_ms);
+    let location = row.frontier_location.as_deref().unwrap_or("?");
+    format!(
+        "{} {} ({} pts \u{00b7} L{} \u{00b7} {}r \u{00b7} {}) — {}",
+        emoji, name, pts, level, rounds, time, location
+    )
+}
+
+fn build_frontier_description(count: usize) -> String {
+    format!(
+        "All-time \u{00b7} {} players \u{00b7} https://maptap.gg/frontier",
+        count
+    )
+}
+
+/// Frontier summary embed: medals on top, skulls on bottom (when >3 players).
+pub fn build_frontier_summary_embed(
+    title: &str,
+    rows: &[FrontierLeaderboardRow],
+) -> CreateEmbed {
+    let desc = build_frontier_description(rows.len());
+    let top3: String = rows
+        .iter()
+        .enumerate()
+        .take(3)
+        .map(|(i, row)| format_frontier_entry(MEDALS[i], row))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut embed = CreateEmbed::new()
+        .title(title)
+        .color(COLOR_FRONTIER_ORANGE)
+        .description(desc)
+        .field("Top 3", &top3, false);
+
+    let len = rows.len();
+    if len > 3 {
+        let start = std::cmp::max(3, len.saturating_sub(3));
+        let bottom: String = rows[start..len]
+            .iter()
+            .map(|row| format_frontier_entry(SKULL, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        embed = embed.field("Bottom 3", &bottom, false);
+    }
+
+    embed
+}
+
+/// Frontier full embed: every entry ranked, truncated to Discord's 4096-char limit.
+pub fn build_frontier_full_embed(
+    title: &str,
+    rows: &[FrontierLeaderboardRow],
+) -> CreateEmbed {
+    let desc = build_frontier_description(rows.len());
+
+    let mut lines = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let name = truncate_username(&row.username, 20);
+        let pts = fmt_thousands(row.final_score);
+        let level = row.frontier_level.unwrap_or(0);
+        let rounds = row.frontier_rounds.unwrap_or(0);
+        let time = fmt_frontier_time(row.time_spent_ms);
+        let location = row.frontier_location.as_deref().unwrap_or("?");
+        lines.push(format!(
+            "{}. {} — {} pts \u{00b7} L{} \u{00b7} {}r \u{00b7} {} — {}",
+            i + 1,
+            name,
+            pts,
+            level,
+            rounds,
+            time,
+            location
+        ));
+    }
+
+    let mut body = String::new();
+    let suffix = "\n... (truncated)";
+    let budget = 4096 - desc.len() - 2 - suffix.len();
+    for line in &lines {
+        if body.len() + line.len() + 1 > budget {
+            body.push_str(suffix);
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+    }
+
+    CreateEmbed::new()
+        .title(title)
+        .color(COLOR_FRONTIER_ORANGE)
+        .description(format!("{}\n\n{}", desc, body))
 }

@@ -1,4 +1,4 @@
-use crate::db::{DbStats, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot, UserRow};
+use crate::db::{DbStats, FrontierLeaderboardRow, LeaderboardRow, ScoreRow, StatsDelta, StatsSnapshot, UserRow};
 
 pub trait Repository: Send + Sync {
     // ── Read: scores ────────────────────────────────────────────────────────
@@ -23,6 +23,9 @@ pub trait Repository: Send + Sync {
     /// Weekly leaderboard for a guild across a date range.
     /// week_start / week_end are "YYYY-MM-DD". `use_sum` toggles sum vs avg aggregation.
     fn get_weekly_leaderboard(&self, guild_id: u64, week_start: &str, week_end: &str, use_sum: bool) -> Result<Vec<LeaderboardRow>, String>;
+
+    /// Frontier leaderboard: best valid run per user for a guild (permanent only).
+    fn get_frontier_leaderboard(&self, guild_id: u64) -> Result<Vec<FrontierLeaderboardRow>, String>;
 
     // ── Admin: score management ──────────────────────────────────────────────
     fn get_score(&self, message_id: &str) -> Result<Option<ScoreRow>, String>;

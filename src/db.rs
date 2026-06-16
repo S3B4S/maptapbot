@@ -18,6 +18,19 @@ pub struct LeaderboardRow {
     pub time_spent_ms: Option<f64>,
 }
 
+/// Row returned by the Frontier leaderboard query — one row per user (their best run).
+#[derive(Debug)]
+pub struct FrontierLeaderboardRow {
+    pub user_id: String,
+    pub username: String,
+    pub final_score: i64,
+    pub frontier_level: Option<i64>,
+    pub frontier_rounds: Option<i64>,
+    pub frontier_location: Option<String>,
+    pub time_spent_ms: Option<i64>,
+    pub posted_at: String,
+}
+
 /// Row returned by admin score-listing queries.
 #[derive(Debug)]
 pub struct ScoreRow {
@@ -753,6 +766,51 @@ impl Database {
                 })
             },
         )?;
+        rows.collect()
+    }
+
+    /// Frontier leaderboard: best valid run per user for a given guild.
+    ///
+    /// Each user contributes one row — their highest `final_score`. Ties on
+    /// `final_score` are broken by earliest `posted_at` (the earlier submission
+    /// wins). Banned users are excluded. Rows are sorted by `final_score DESC,
+    /// posted_at ASC` so position-in-vec equals rank.
+    pub fn get_frontier_leaderboard(
+        &self,
+        guild_id: u64,
+    ) -> Result<Vec<FrontierLeaderboardRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "WITH best AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, guild_id
+                    ORDER BY final_score DESC, posted_at ASC, message_id ASC
+                ) AS rn
+                FROM scores s
+                WHERE s.invalid = 0
+                  AND s.guild_id = ?1
+                  AND s.mode = 'frontier'
+             )
+             SELECT b.user_id, u.username, b.final_score,
+                    b.frontier_level, b.frontier_rounds, b.frontier_location,
+                    b.time_spent_ms, b.posted_at
+             FROM best b
+             JOIN users u ON b.user_id = u.user_id
+             WHERE b.rn = 1
+               AND u.banned = 0
+             ORDER BY b.final_score DESC, b.posted_at ASC",
+        )?;
+        let rows = stmt.query_map(params![guild_id.to_string()], |row| {
+            Ok(FrontierLeaderboardRow {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                final_score: row.get(2)?,
+                frontier_level: row.get(3)?,
+                frontier_rounds: row.get(4)?,
+                frontier_location: row.get(5)?,
+                time_spent_ms: row.get(6)?,
+                posted_at: row.get(7)?,
+            })
+        })?;
         rows.collect()
     }
 
